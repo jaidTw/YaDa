@@ -5,7 +5,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import List
 
-from yara_const import Opcode, StrFlag, RuleFlag, MetaType
+from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
 
 
 def unpack(stream, fmt):
@@ -25,16 +25,21 @@ class YaraRule(object):
         self.data.setdefault('strings', OrderedDict())
 
     def __get_strings(self):
-        for val in self.data.get('code', []):
-            if val['opcode'] == Opcode.OP_PUSH and isinstance(val['args'][0], dict):
-                self.data['strings'][val['args'][0]['identifier']] = val['args'][0]
+        strings_ptr_set = self.data.setdefault('strings_ptr_set', set())
+        for s in self.data.get('_strings'):
+            self.data['strings'][s['identifier']] = s
+            strings_ptr_set.add(s['ptr'])
 
     def get_rule(self):
         self.__get_strings()
         out = ''
         if self.data['flags'] & RuleFlag.PRIVATE:
             out += 'private '
-        out += 'rule {ns}{identifier} {{\n'.format(**self.data)
+        out += 'rule {ns}{identifier}'.format(**self.data)
+        if self.data['tags']:
+            out += ' : {}'.format(self.data['tags'])
+        out += ' {\n'
+        out += '\t// ptr = {:x}\n'.format(self.data['ptr'])
         if self.data.get('metadata'):
             out += '\tmeta:\n'
             for name, val in self.data['metadata'].items():
@@ -49,14 +54,14 @@ class YaraRule(object):
         if self.data.get('strings'):
             out += '\tstrings:\n'
             for string in self.data['strings'].values():
-                out += '\t\t{identifier}'.format(**string)
+                out += '\t/*{ptr:x}*/\t{identifier}'.format(**string)
 
                 if string['flags'] & StrFlag.HEXADECIMAL and string['flags'] & StrFlag.LITERAL:
                     out += ' = {str}'.format(**string)
                 elif string['flags'] & StrFlag.LITERAL:
                     out += ' = "{str}"'.format(**string)
                 else:
-                    out += ' [__unrecoverable_with_yaradec__]'
+                    out += ' [__unrecoverable_with_yaradec__] /* flags = %s */' % string['flags']
 
                 if string['flags'] & StrFlag.FULL_WORD:
                     out += ' fullword'
@@ -73,7 +78,7 @@ class YaraRule(object):
 
         out += '\t__yaradec_asm__:\n'
         for val in self.data.get('code', []):
-            out += '\t\t{}'.format(val['opcode'].name)
+            out += '\t{:x}\t{}'.format(val['ptr'], val['opcode'].name)
             if val['args']:
                 out += ' ('
                 for x in val['args']:
@@ -101,8 +106,7 @@ class YaraDec_v11(object):
         if not self.relocate():
             raise RuntimeError('Invalid file')
 
-        self.version, self.rules, self.externals, self.code_start, self.match, self.transition = unpack(self.data,
-                                                                                                        '<L' + '4xL' * 5)
+        self.version, self.rules, self.externals, self.code_start, self.automation = unpack(self.data, '<LQQQQ')
 
     def relocate(self):
         try:
@@ -116,11 +120,50 @@ class YaraDec_v11(object):
                 if (reloc_target == 0xFFFABADA):
                     self.data.getbuffer()[reloc:reloc + 4] = b'\0\0\0\0'
 
+                print('reloc: 0x%.8x: 0x%.8x' % (reloc, reloc_target))
+
                 reloc = unpack(self.stream, '<L')[0]
         except struct.error:
             print("Invalid file (bad relocs)")
             return False
         return True
+
+    def _disasm(self, ip):
+        self.data.seek(ip)
+        opcode = Opcode(self.data.read(1)[0])
+
+        if opcode in (
+            Opcode.OP_CLEAR_M,
+            Opcode.OP_ADD_M,
+            Opcode.OP_INCR_M,
+            Opcode.OP_PUSH_M,
+            Opcode.OP_POP_M,
+            Opcode.OP_SWAPUNDEF,
+            Opcode.OP_INIT_RULE,
+            Opcode.OP_PUSH_RULE,
+            Opcode.OP_MATCH_RULE,
+            Opcode.OP_OBJ_LOAD,
+            Opcode.OP_OBJ_FIELD,
+            Opcode.OP_CALL,
+            Opcode.OP_IMPORT,
+            Opcode.OP_INT_TO_DBL,
+
+            Opcode.OP_JNUNDEF,
+            Opcode.OP_JLE,
+            Opcode.OP_JTRUE,
+            Opcode.OP_JFALSE,
+
+            Opcode.OP_PUSH,
+            ):
+            return ip + 9, opcode, (unpack(self.data, '<Q')[0], )
+        else:
+            return ip + 1, opcode, ()
+
+    def disasm(self):
+        ip = self.code_start
+        while True:
+            ip, opcode, args = self._disasm(ip)
+            yield (ip, opcode, args)
 
     def get_code(self, buf, ip):
         if self.code.get(ip):
@@ -148,39 +191,77 @@ class YaraDec_v11(object):
             Opcode.OP_INT_TO_DBL,
         ]:
             args.append(unpack2(buf, ip + 1, '<Q')[0])
-            next = [ip + 8 + 1]
+            next = [ip + 9]
         elif opcode in [
             Opcode.OP_JNUNDEF,
             Opcode.OP_JLE,
             Opcode.OP_JTRUE,
             Opcode.OP_JFALSE,
         ]:
-            next = [unpack2(buf, ip + 1, '<Q')[0], ip + 8]
+            branch = unpack2(buf, ip + 1, '<Q')[0]
+            next = [branch, ip + 9]
+            args.append(branch)
         elif opcode == Opcode.OP_PUSH:
             arg = unpack2(buf, ip + 1, '<Q')[0]
-            try:
-                string = self.get_string(arg)
-                if string:
-                    args.append(string)
-                else:
-                    args.append(arg)
-            except struct.error as exc:
+            if arg == UNDEFINED:
+                args.append('UNDEFINED')
+            else:
                 args.append(arg)
+                try:
+                    args.append(self.get_string(arg))
+                except struct.error as exc:
+                    pass
             next = [ip + 8 + 1]
+#        elif opcode in [
+#            Opcode.OP_UINT32BE,
+#            Opcode.OP_INT_EQ,
+#            Opcode.OP_AND,
+#            Opcode.OP_NOT,
+#            Opcode.OP_OF,
+#            Opcode.OP_INT_ADD,
+#            Opcode.OP_COUNT,
+#            Opcode.OP_FOUND,
+#            Opcode.OP_OFFSET,
+#            Opcode.OP_UINT16,
+#            Opcode.OP_UINT32,
+#        ]:
+#            next = [ip + 1]
+        elif opcode in [
+            Opcode.OP_ERROR,
+        ]:
+            next = []
         else:
+            #print('Unknown OPcode: %d (%s?)' % (opcode, opcode))
             next = [ip + 1]
 
-        data = dict(next=next, opcode=opcode, args=args)
+        data = dict(ptr=ip, next=next, opcode=opcode, args=args)
         self.code[ip] = data
         return next
 
     def get_raw_str(self, addr):
         if not addr:
             return None
-        return self.data.getvalue()[addr:].split(b'\0')[0].decode('utf-8')
+        self.data.seek(addr)
+        blob = self.data.read(512)
+        while b'\0' not in blob:
+            n = self.data.read(len(blob)*2)
+            if not n: break
+            blob += n
+        return blob.split(b'\0', 1)[0].decode('latin1')
 
     def get_meta(self, addr):
-        fmt = '<L4xL4xL4xL4x'
+        '''
+        typedef struct _YR_META
+        {
+          int32_t type;
+          int32_t integer;
+
+          DECLARE_REFERENCE(const char*, identifier);
+          DECLARE_REFERENCE(char*, string);
+
+        } YR_META;
+        '''
+        fmt = '<LLQQ'
         size = struct.calcsize(fmt)
         buf = self.data.getbuffer()
         i = 0
@@ -205,14 +286,49 @@ class YaraDec_v11(object):
         return metadatas
 
     def get_ns(self, addr):
-        fmt = '<' + 'L' * 32 + 'L'
+        fmt = '<' + 'x' * (_MAX_THREADS*4) + 'L'
         buf = self.data.getbuffer()
-        ns = self.get_raw_str(unpack2(buf, addr, fmt)[32])
+        ns = self.get_raw_str(unpack2(buf, addr, fmt)[0])
         return '{}:'.format(ns) if ns else ''
 
+    def get_strings(self, addr):
+        strings = []
+        while True:
+            string = self.get_string(addr)
+            if not string:
+                break
+            strings.append(string)
+            addr += 4 * 4 + 8 * 4 + (20*_MAX_THREADS*2)
+        return strings
+
     def get_string(self, addr):
+        '''
+        typedef struct _YR_STRING
+        {
+          int32_t g_flags;
+          int32_t length;
+
+          DECLARE_REFERENCE(char*, identifier);
+          DECLARE_REFERENCE(uint8_t*, string);
+          DECLARE_REFERENCE(struct _YR_STRING*, chained_to);
+
+          int32_t chain_gap_min;
+          int32_t chain_gap_max;
+
+          int64_t fixed_offset;
+
+          YR_MATCHES matches[MAX_THREADS];
+          YR_MATCHES unconfirmed_matches[MAX_THREADS];
+
+          #ifdef PROFILING_ENABLED
+          uint64_t clock_ticks;
+          #endif
+
+        } YR_STRING;
+        '''
+
         buf = self.data.getbuffer()
-        g_flags, length, identifier, str_data, chained_to = unpack2(buf, addr, '<LLL4xL4xL4x')
+        g_flags, length, identifier, str_data, chained_to, chain_gap_min, chain_gap_max, fixed_offset = unpack2(buf, addr, '<LLQQQLLQ' + 'x' * (20*_MAX_THREADS*2))
 
         flags = StrFlag(g_flags)
 
@@ -222,45 +338,72 @@ class YaraDec_v11(object):
         str_str = unpack2(buf, str_data, '{}s'.format(length))[0]  # type: bytes
 
         data = dict(
+            ptr=addr,
             flags=flags,
             length=length,
             chained_to=chained_to,
+            chain_gap_min=chain_gap_min,
+            chain_gap_max=chain_gap_max,
+            fixed_offset=fixed_offset,
             identifier=self.get_raw_str(identifier),
         )
 
         if flags & StrFlag.HEXADECIMAL and flags & StrFlag.LITERAL:
             data['str'] = '{' + ' '.join(['{:X}'.format(x) for x in str_str]) + '}'
         elif flags & StrFlag.LITERAL:
-            data['str'] = str_str.decode('utf-8')
+            data['str'] = str_str.decode('latin1')
         else:
             data['str'] = None
 
         return data
 
     def get_rule(self, addr):
-        fmt = '<L' + 'L' * 32 + '4xL4xL4xL4xL4xL'
+        '''
+        typedef struct _YR_RULE
+        {
+          int32_t g_flags;               // Global flags
+          int32_t t_flags[MAX_THREADS];  // Thread-specific flags
+
+          DECLARE_REFERENCE(const char*, identifier);
+          DECLARE_REFERENCE(const char*, tags);
+          DECLARE_REFERENCE(YR_META*, metas);
+          DECLARE_REFERENCE(YR_STRING*, strings);
+          DECLARE_REFERENCE(YR_NAMESPACE*, ns);
+
+          #ifdef PROFILING_ENABLED
+          uint64_t clock_ticks;
+          #endif
+
+        } YR_RULE;
+        '''
+        fmt = '<L' + 'x' * (_MAX_THREADS * 4) + 'QQQQQ'
         buf = self.data.getbuffer()
-        rules_data = unpack2(buf, addr, fmt)
+        flags, identifier, tags, meta, strings, ns = unpack2(buf, addr, fmt)
 
-        data = dict()
+        data = dict(ptr=addr)
 
-        data['flags'] = RuleFlag(rules_data[0])
+        data['flags'] = flags = RuleFlag(flags)
+        if flags & RuleFlag.NULL:
+            return None
 
-        identifier = rules_data[33]
         if identifier:
             data['identifier'] = self.get_raw_str(identifier)
 
-        tags = rules_data[34]
         if tags:
             data['tags'] = self.get_raw_str(tags)
+        else:
+            data['tags'] = None
 
-        meta = rules_data[35]
         if meta:
             data['metadata'] = self.get_meta(meta)
 
-        ns = rules_data[37]
         if ns:
             data['ns'] = self.get_ns(ns)
+
+        if strings:
+            data['_strings'] = self.get_strings(strings)
+        else:
+            data['_strings'] = []
 
         return data
 
@@ -274,7 +417,20 @@ class YaraDec_v11(object):
             ip = todo.pop()
             todo += self.get_code(buf, ip)
 
-    def get_rules(self):
+    def get_rules_easy(self):
+        rules = []
+        i = 0
+        while True:
+            c = self.get_rule(self.rules + i * 0xac)
+            if not c: break
+            i += 1
+            c['ns'] = ''
+            c['code'] = []
+            rules.append(YaraRule(c))
+
+        return rules
+
+    def get_rules(self) -> List[YaraRule]:
         self.parse_code()
         rules = []
         cur_rule = None
@@ -289,12 +445,25 @@ class YaraDec_v11(object):
 
         return rules
 
-
 decoders = {
+    8: YaraDec_v11,
     11: YaraDec_v11,
     12: YaraDec_v11,  # TODO: look for changes in v12
 }
 
+def load_file(fn=None, fp=None):
+    if fn:
+        fp = open(fn, 'rb')
+
+    header, size, version = unpack(fp, '<4sLB')
+    if header != b'YARA':
+        raise ValueError('Invalid file (bad header)')
+
+    decoder = decoders.get(version)
+    if not decoder:
+        raise NotImplemented('Unsupported version')
+
+    return decoder(fp, size)
 
 def main():
     try:
@@ -303,22 +472,13 @@ def main():
         print("Usage: {} [path]".format(sys.argv[0]))
         sys.exit(1)
 
-    stream = path.open('rb')
-    header, size, version = unpack(stream, '<4sLB')
-    if header != b'YARA':
-        print("Invalid file (bad header)")
-        sys.exit(2)
-
-    decoder = decoders.get(version)
-    if not decoder:
-        print("Invalid file (unsupported version)")
-        sys.exit(2)
-
-    dec = decoder(stream, size)
-    rules = dec.get_rules()  # type: List[YaraRule]
+    dec = load_file(fp=path.open('rb'))
+    rules = dec.get_rules()
     for rule in rules:
         print(rule.get_rule())
 
+    for addr, opcode, args in dec.disasm():
+        print('%.8x: %-10s %r' % (addr, opcode, args))
 
 if __name__ == '__main__':
     main()

@@ -4,6 +4,7 @@ from enum import IntEnum, IntFlag
 # Constants extracted from libyara/include/types.h   (github.com/VirusTotal/yara)
 
 UNDEFINED = 0xFFFABADAFABADAFF
+_MAX_THREADS = 32
 
 
 def IS_UNDEFINED(X):
@@ -54,31 +55,30 @@ class Opcode(IntEnum):
     OP_OBJ_FIELD = 18
     OP_INDEX_ARRAY = 19
     OP_COUNT = 20
-    OP_LENGTH = 21
-    OP_FOUND = 22
-    OP_FOUND_AT = 23
-    OP_FOUND_IN = 24
-    OP_OFFSET = 25
-    OP_OF = 26
-    OP_PUSH_RULE = 27
-    OP_INIT_RULE = 28
-    OP_MATCH_RULE = 29
-    OP_INCR_M = 30
-    OP_CLEAR_M = 31
-    OP_ADD_M = 32
-    OP_POP_M = 33
-    OP_PUSH_M = 34
-    OP_SWAPUNDEF = 35
-    OP_JNUNDEF = 36
-    OP_JLE = 37
-    OP_FILESIZE = 38
-    OP_ENTRYPOINT = 39
-    OP_CONTAINS = 40
-    OP_MATCHES = 41
-    OP_IMPORT = 42
-    OP_LOOKUP_DICT = 43
-    OP_JFALSE = 44
-    OP_JTRUE = 45
+    OP_FOUND = 21
+    OP_FOUND_AT = 22
+    OP_FOUND_IN = 23
+    OP_OFFSET = 24
+    OP_OF = 25
+    OP_PUSH_RULE = 26
+    OP_INIT_RULE = 27
+    OP_MATCH_RULE = 28
+    OP_INCR_M = 29
+    OP_CLEAR_M = 30
+    OP_ADD_M = 31
+    OP_POP_M = 32
+    OP_PUSH_M = 33
+    OP_SWAPUNDEF = 34
+    OP_JNUNDEF = 35
+    OP_JLE = 36
+    OP_FILESIZE = 37
+    OP_ENTRYPOINT = 38
+    OP_CONTAINS = 39
+    OP_MATCHES = 40
+    OP_IMPORT = 41
+    OP_LOOKUP_DICT = 42
+    OP_JFALSE = 43
+    OP_JTRUE = 44
 
     OP_INT_EQ = (OP_INT_BEGIN + _OP_EQ)
     OP_INT_NEQ = (OP_INT_BEGIN + _OP_NEQ)

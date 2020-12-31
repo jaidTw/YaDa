@@ -120,7 +120,7 @@ class YaraDec_v11(object):
                 if (reloc_target == 0xFFFABADA):
                     self.data.getbuffer()[reloc:reloc + 4] = b'\0\0\0\0'
 
-                print('reloc: 0x%.8x: 0x%.8x' % (reloc, reloc_target))
+                #print('reloc: 0x%.8x: 0x%.8x' % (reloc, reloc_target))
 
                 reloc = unpack(self.stream, '<L')[0]
         except struct.error:

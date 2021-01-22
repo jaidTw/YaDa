@@ -125,6 +125,30 @@ class Opcode(IntEnum):
     OP_UINT32BE = (OP_READ_INT + 11)
 
 
+SINGLE_ARG_OPCODES = set([
+    Opcode.OP_NOT,
+    Opcode.OP_BITWISE_NOT,
+    Opcode.OP_INT8,
+    Opcode.OP_INT16,
+    Opcode.OP_INT32,
+    Opcode.OP_UINT8,
+    Opcode.OP_UINT16,
+    Opcode.OP_UINT32,
+    Opcode.OP_INT8BE,
+    Opcode.OP_INT16BE,
+    Opcode.OP_INT32BE,
+    Opcode.OP_UINT8BE,
+    Opcode.OP_UINT16BE,
+    Opcode.OP_UINT32BE,
+])
+
+DOUBLE_ARG_OPCODES = set([
+    Opcode.OP_OR,
+    Opcode.OP_AND,
+    Opcode.OP_INT_EQ,
+    Opcode.OP_FOUND_AT
+])
+
 def IS_INT_OP(X):
     return (X) >= Opcode.OP_INT_BEGIN and (X) <= Opcode.OP_INT_END
 

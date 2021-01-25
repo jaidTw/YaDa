@@ -140,13 +140,17 @@ SINGLE_ARG_OPCODES = set([
     Opcode.OP_UINT8BE,
     Opcode.OP_UINT16BE,
     Opcode.OP_UINT32BE,
+    Opcode.OP_FOUND,
+    Opcode.OP_COUNT,
 ])
 
 DOUBLE_ARG_OPCODES = set([
     Opcode.OP_OR,
     Opcode.OP_AND,
     Opcode.OP_INT_EQ,
-    Opcode.OP_FOUND_AT
+    Opcode.OP_FOUND_AT,
+    Opcode.OP_INT_ADD,
+    Opcode.OP_INT_NEQ,
 ])
 
 def IS_INT_OP(X):

@@ -6,16 +6,38 @@ import struct
 from utils import unpack, unpack2
 from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES
 
+OPTIONS_OUTPUT_ASM = True
+OPTIONS_OUTPUT_TREE = True
+
+class DecompileError(Exception):
+    pass
+
+def escape_str(s):
+    return '"%s"' % (s
+            .replace('\\', '\\\\')
+            .replace('\0', '\\0')
+            .replace('\n', '\\n')
+            .replace('\r', '\\r')
+            .replace('\t', '\\t')
+            .replace('"', '\\"'))
 
 def stringify(op):
     TABLE = {
         Opcode.OP_INT_EQ: '==',
+        Opcode.OP_INT_NEQ: '!=',
+        Opcode.OP_INT_ADD: '+',
         Opcode.OP_AND: 'and',
         Opcode.OP_OR: 'or',
+        Opcode.OP_UINT8: 'uint8',
         Opcode.OP_UINT16: 'uint16',
+        Opcode.OP_FOUND: '',
         Opcode.OP_FOUND_AT: 'at',
+        Opcode.OP_UINT32BE: 'uint32be',
+        Opcode.OP_UINT32: 'uint32',
+        Opcode.OP_NOT: 'not',
     }
     return TABLE[op]
+    #return TABLE.get(op) or repr(op)
 
 def optimize_walk(node):
     if node.type == 'val':
@@ -23,6 +45,10 @@ def optimize_walk(node):
 
     # TODO: should we do constant folding or constant propagation?
     if node.data == Opcode.OP_PUSH:   # eliminate push nodes
+        node.type = 'val'
+        node.data = node.childs[0].data
+        node.childs = []
+    elif node.data == Opcode.OP_PUSH_RULE:   # eliminate push nodes
         node.type = 'val'
         node.data = node.childs[0].data
         node.childs = []
@@ -53,8 +79,27 @@ class Node:
             out += f' childs={self.childs}'
         return f'<Node {out}>'
 
+    def as_tree(self, depth=0):
+        indent = ' ' * (depth * 4)
+        out = [indent, '<Node type=%s ' % self.type]
+
+        if self.type == 'val':
+            out.append(str(self.data[0]))
+        else:
+            out.append(str(self.data))
+            out.append(f' childs=[\n')
+            for i in self.childs:
+                if i.as_tree:
+                    out.extend([i.as_tree(depth + 1), ',\n'])
+                else:
+                    out.extend([indent, '    ', repr(out)])
+            out.append(f'{indent}]')
+
+        out.append('>')
+        return ''.join(out)
+
     def __repr__(self):
-        return str(self)
+        return self.as_tree()
 
     def pretty(self):
         out = ''
@@ -64,12 +109,20 @@ class Node:
                 arg_id = self.data[1]['identifier']
             except:
                 pass
-            if any(arg_id):
+            if arg_id:
                 out += str(arg_id)
+            elif isinstance(self.data[0], int):
+                v = self.data[0]
+                if v > 9:
+                    out += '0x%x' % v
+                else:
+                    out += '%d' % v
             else:
                 out += str(self.data[0])
-        else:
-            if self.data in DOUBLE_ARG_OPCODES:
+        elif self.type == 'op':
+            if self.data == Opcode.OP_COUNT:
+                return '#' + self.childs[0].data[1]['identifier'][1:]
+            elif self.data in DOUBLE_ARG_OPCODES:
                 lchild = self.childs[1]
                 rchild = self.childs[0]
                 lhs = lchild.pretty()
@@ -83,25 +136,27 @@ class Node:
                 out += f'{lhs} {stringify(self.data)} {rhs}'
 
             elif self.data in SINGLE_ARG_OPCODES:
-                out += f'{stringify(self.data)}({self.childs[0].pretty()})'
+                out += f'{stringify(self.data)} ({self.childs[0].pretty()})'
 
             elif self.data == Opcode.OP_OF:
                 n = self.childs[-1]
                 if n.data[0] == 'UNDEFINED':
                     lhs = 'all'
+                elif n.data[0] == 1:
+                    lhs = 'any'
                 else:
                     lhs = n.pretty()
 
                 operands = self.childs[0:-2]
                 if len(operands) == len(self.rule.data['strings']):
-                    rhs = 'them'
+                    rhs = 'them' # TODO: more check
                 else:
-                    rhs = ','.join([child.data[1]['identifier'] for child in reversed(operands)])
+                    rhs = ', '.join([child.data[1]['identifier'] for child in reversed(operands)])
 
-                # TODO: substitute to "them"
                 out += f'({lhs} of {rhs})'
-            elif self.data == Opcode.OP_PUSH:
-                out += f'PUSH({self.childs[0].pretty()})'
+        else: # not op, not val?
+            assert 0
+
         return out
 
 
@@ -110,14 +165,12 @@ class YaraRule:
         self.data = data
         self.data.setdefault('strings', OrderedDict())
 
-    def __get_strings(self):
         strings_ptr_set = self.data.setdefault('strings_ptr_set', set())
-        for s in self.data.get('_strings'):
+        for s in self.data.get('strings_list'):
             self.data['strings'][s['identifier']] = s
             strings_ptr_set.add(s['ptr'])
 
     def __str__(self):
-        self.__get_strings()
         out = ''
         if self.data['flags'] & RuleFlag.PRIVATE:
             out += 'private '
@@ -140,14 +193,14 @@ class YaraRule:
         if self.data.get('strings'):
             out += '\tstrings:\n'
             for string in self.data['strings'].values():
-                out += '\t/*{ptr:x}*/\t{identifier}'.format(**string)
+                out += '\t/*0x{ptr:x}*/\t{identifier}'.format(**string)
 
                 if string['flags'] & StrFlag.HEXADECIMAL and string['flags'] & StrFlag.LITERAL:
                     out += ' = {str}'.format(**string)
                 elif string['flags'] & StrFlag.LITERAL:
-                    out += ' = "{str}"'.format(**string)
+                    out += ' = ' + escape_str(string['str'])
                 else:
-                    out += ' [__unrecoverable_with_yaradec__] /* flags = %s */' % string['flags']
+                    out += ' = /UNRECOVERABLE_REGEXP/ /* regex is unrecoverable right now. flags = %s */' % string['flags']
 
                 if string['flags'] & StrFlag.FULL_WORD:
                     out += ' fullword'
@@ -162,8 +215,16 @@ class YaraRule:
                     out += ' regex'
                 out += '\n'
 
-        #out += self.print_asm()
-        out += self.print_decompile()
+        if OPTIONS_OUTPUT_ASM:
+            out += self.print_asm()
+        if self.AST:
+            try:
+                out += self.print_decompile()
+            except DecompileError as e:
+                out += '/*\nDecompileError: %r\n*/' % e
+            if OPTIONS_OUTPUT_TREE:
+                out += '\n/*\n%s\n*/\n' % repr(self.AST)
+        out += '}\n'
         out += '\n'
 
         return out
@@ -173,7 +234,7 @@ class YaraRule:
         stack = []
         for inst in code:
             opcode = inst['opcode']
-            if opcode in [Opcode.OP_PUSH]:
+            if opcode in [Opcode.OP_PUSH, Opcode.OP_PUSH_RULE]:
                 node = Node(opcode, 'op', self)
                 node.append(Node(inst['args'], 'val', self))
                 stack.append(node)
@@ -182,7 +243,7 @@ class YaraRule:
                 node = Node(opcode, 'op', self)
                 node.append(stack.pop())
                 stack.append(node)
-                    
+
             elif opcode in DOUBLE_ARG_OPCODES:
                 node = Node(opcode, 'op', self)
                 node.append(stack.pop())
@@ -199,6 +260,13 @@ class YaraRule:
 
                 node.append(stack.pop())
                 stack.append(node)
+
+            elif opcode in (Opcode.OP_INIT_RULE, Opcode.OP_JFALSE, Opcode.OP_JTRUE, Opcode.OP_MATCH_RULE):
+                pass
+
+            else:
+                self.AST = None
+                return
 
         self.AST = stack.pop()
 
@@ -218,17 +286,17 @@ class YaraRule:
                         out += ' {} '.format(x)
                 out += ')'
             out += '\n'
-        out += '}\n'
         return out
 
     def print_decompile(self):
-        out = '\t__yaradec_decompile__:\n'
+        out = '\tcondition:\n'
         node = self.AST
-        out += node.pretty()
+        out += '\t\t' + node.pretty()
         return out
 
     def optimize(self):
-        optimize_walk(self.AST)
+        if self.AST:
+            optimize_walk(self.AST)
 
 
 class v11:
@@ -341,10 +409,7 @@ class v11:
                 args.append('UNDEFINED')
             else:
                 args.append(arg)
-                try:
-                    args.append(self.get_string(arg))
-                except struct.error as exc:
-                    pass
+                # TODO: args.append(string)
             next = [ip + 8 + 1]
         elif opcode in [
             Opcode.OP_ERROR,
@@ -411,14 +476,12 @@ class v11:
         return '{}:'.format(ns) if ns else ''
 
     def get_strings(self, addr):
-        strings = []
         while True:
             string = self.get_string(addr)
             if not string:
                 break
-            strings.append(string)
+            yield string
             addr += 4 * 4 + 8 * 4 + (20*_MAX_THREADS*2)
-        return strings
 
     def get_string(self, addr):
         '''
@@ -518,11 +581,15 @@ class v11:
 
         if ns:
             data['ns'] = self.get_ns(ns)
+        else:
+            data['ns'] = ''
 
         if strings:
-            data['_strings'] = self.get_strings(strings)
+            data['strings_list'] = list(self.get_strings(strings))
+            data['strings_map'] = { s['ptr']: s for s in data['strings_list'] }
         else:
-            data['_strings'] = []
+            data['strings_list'] = []
+            data['strings_map'] = {}
 
         return data
 
@@ -536,31 +603,38 @@ class v11:
             ip = todo.pop()
             todo += self.get_code(buf, ip)
 
-    def get_rules_easy(self):
-        rules = []
+    def get_rules(self):
         i = 0
         while True:
             c = self.get_rule(self.rules + i * 0xac)
             if not c: break
             i += 1
-            c['ns'] = ''
             c['code'] = []
-            rules.append(YaraRule(c))
-
-        return rules
+            yield YaraRule(c)
 
     def parse_rules(self) -> List[YaraRule]:
+        rules = list(self.get_rules())
+        addr_rules_map = { r.data['ptr']: r for r in rules }
+
         self.parse()
-        rules = []
         cur_rule = None
         for val in self.code.values():
             if val['opcode'] == Opcode.OP_INIT_RULE:
-                cur_rule = self.get_rule(val['args'][0])
-                cur_rule['code'] = []
-                rules.append(YaraRule(cur_rule))
+                cur_rule = addr_rules_map[val['args'][0]]
+
+            elif val['opcode'] == Opcode.OP_PUSH:
+                arg0 = val['args'][0]
+                if arg0 in cur_rule.data['strings_ptr_set']:
+                    val['args'].append(cur_rule.data['strings_map'][arg0])
+
+            elif val['opcode'] == Opcode.OP_PUSH_RULE:
+                arg = addr_rules_map.get(val['args'][0])
+                if arg:
+                    val['args'].append(arg.data)
+
             elif val['opcode'] == Opcode.OP_HALT:
                 break
-            cur_rule['code'].append(val)
+            cur_rule.data['code'].append(val)
 
         for rule in rules:
             rule.build_AST()

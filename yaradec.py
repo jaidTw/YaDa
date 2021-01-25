@@ -50,8 +50,17 @@ def main():
             exit()
 
     rules = dec.parse_rules()
+    cnt = 0
+    unrecoverable = 0
     for rule in rules:
-        print(rule)
+        o = str(rule)
+        cnt += 1
+        if 'UNRECOVERABLE_REGEXP' in o:
+            unrecoverable += 1
+        print(o)
+
+    print('/* Decompile %d/%d rules */' % (cnt - unrecoverable, cnt))
+    print('// vim: ft=yara')
 
     #for addr, opcode, args in dec.disasm():
     #    print('%.8x: %-10s %r' % (addr, opcode, args))

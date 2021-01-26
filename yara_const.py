@@ -124,10 +124,30 @@ class Opcode(IntEnum):
     OP_UINT16BE = (OP_READ_INT + 10)
     OP_UINT32BE = (OP_READ_INT + 11)
 
+IGNORED_OPCODES = {
+    Opcode.OP_INIT_RULE,
+    Opcode.OP_JTRUE,
+    Opcode.OP_JFALSE,
+}
 
-SINGLE_ARG_OPCODES = set([
+NO_ARG_OPCODES = {
+    Opcode.OP_FILESIZE,
+    Opcode.OP_ENTRYPOINT,
+    Opcode.OP_INCR_M,
+    Opcode.OP_CLEAR_M,
+    Opcode.OP_POP_M,
+    Opcode.OP_PUSH_M,
+}
+
+SINGLE_ARG_NO_PARENTHESES = {
     Opcode.OP_NOT,
+    Opcode.OP_COUNT,
     Opcode.OP_BITWISE_NOT,
+    Opcode.OP_INT_MINUS,
+    Opcode.OP_ADD_M,
+}
+
+SINGLE_ARG_HAS_PARENTHESES = {
     Opcode.OP_INT8,
     Opcode.OP_INT16,
     Opcode.OP_INT32,
@@ -140,14 +160,29 @@ SINGLE_ARG_OPCODES = set([
     Opcode.OP_UINT8BE,
     Opcode.OP_UINT16BE,
     Opcode.OP_UINT32BE,
-])
+}
 
-DOUBLE_ARG_OPCODES = set([
+SINGLE_ARG_OPCODES = {
+    *SINGLE_ARG_NO_PARENTHESES,
+    *SINGLE_ARG_HAS_PARENTHESES,
+    Opcode.OP_FOUND,
+}
+
+TWO_ARG_OPCODES = {
     Opcode.OP_OR,
     Opcode.OP_AND,
     Opcode.OP_INT_EQ,
-    Opcode.OP_FOUND_AT
-])
+    Opcode.OP_INT_NEQ,
+    Opcode.OP_INT_LT,
+    Opcode.OP_INT_GT,
+    Opcode.OP_INT_LE,
+    Opcode.OP_INT_GE,
+    Opcode.OP_INT_ADD,
+    Opcode.OP_INT_SUB,
+    Opcode.OP_INT_MUL,
+    Opcode.OP_INT_DIV,
+    Opcode.OP_FOUND_AT,
+}
 
 def IS_INT_OP(X):
     return (X) >= Opcode.OP_INT_BEGIN and (X) <= Opcode.OP_INT_END

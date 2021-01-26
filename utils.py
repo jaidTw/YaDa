@@ -1,5 +1,8 @@
 import struct
 
+IMPORT_UNINPLEMENTED = 1
+OPCODE_UNIMPLEMENTED = 2
+AC_UNRECOVERABLE = 3
 
 def unpack(stream, fmt):
     size = struct.calcsize(fmt)

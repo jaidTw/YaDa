@@ -6,7 +6,6 @@ import sys
 from utils import unpack
 import decompiler
 
-
 decoders = {
     8: decompiler.v11,
     11: decompiler.v11,

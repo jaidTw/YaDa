@@ -3,17 +3,34 @@ from collections import OrderedDict
 import io
 import struct
 
-from utils import unpack, unpack2
-from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES
+from utils import unpack, unpack2, IMPORT_UNINPLEMENTED, OPCODE_UNIMPLEMENTED, AC_UNRECOVERABLE
+from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
+from yara_const import NO_ARG_OPCODES, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, IGNORED_OPCODES
+from yara_const import SINGLE_ARG_NO_PARENTHESES, SINGLE_ARG_HAS_PARENTHESES
 
+rules_table = {}
 
 def stringify(op):
     TABLE = {
         Opcode.OP_INT_EQ: '==',
+        Opcode.OP_INT_NEQ: '!=',
+        Opcode.OP_INT_LT: '<',
+        Opcode.OP_INT_GT: '>',
+        Opcode.OP_INT_LE: '<=',
+        Opcode.OP_INT_GE: '>=',
+        Opcode.OP_INT_ADD: '+',
+        Opcode.OP_INT_SUB: '-',
+        Opcode.OP_INT_MUL: '*',
+        Opcode.OP_INT_DIV: '/',
+        Opcode.OP_INT_MINUS: '-',
+        Opcode.OP_NOT: 'not ',
+        Opcode.OP_BITWISE_NOT: '~',
         Opcode.OP_AND: 'and',
         Opcode.OP_OR: 'or',
         Opcode.OP_UINT16: 'uint16',
         Opcode.OP_FOUND_AT: 'at',
+        Opcode.OP_FILESIZE: 'filesize',
+        Opcode.OP_ENTRYPOINT: 'pe.entrypoint',
     }
     return TABLE[op]
 
@@ -59,36 +76,56 @@ class Node:
     def pretty(self):
         out = ''
         if self.type == 'val':
-            arg_id = ''
+            arg_id = None
             try:
                 arg_id = self.data[1]['identifier']
             except:
                 pass
-            if any(arg_id):
+            if arg_id != None and any(arg_id) and arg_id.isascii():
                 out += str(arg_id)
             else:
                 out += str(self.data[0])
         else:
-            if self.data in DOUBLE_ARG_OPCODES:
-                lchild = self.childs[1]
-                rchild = self.childs[0]
-                lhs = lchild.pretty()
-                if lchild.type != 'val' and lchild.data in DOUBLE_ARG_OPCODES:
-                    lhs = f'({lhs})'
+            if self.data == Opcode.OP_MATCH_RULE:
+                for child in self.childs:
+                    out += child.pretty()
+                
+            elif self.data == Opcode.OP_OFFSET:
                 rhs = self.childs[0].pretty()
-                if rchild.type != 'val' and rchild.data in DOUBLE_ARG_OPCODES:
+                out += f'@{rhs[1:]}'
+            elif self.data in TWO_ARG_OPCODES:
+                rchild, lchild = self.childs[0:2]
+                lhs = lchild.pretty()
+                rhs = rchild.pretty()
+                # Add parentheses
+                if lchild.type != 'val' and lchild.data in {*TWO_ARG_OPCODES, Opcode.OP_OF}:
+                    lhs = f'({lhs})'
+                if rchild.type != 'val' and rchild.data in {*TWO_ARG_OPCODES, Opcode.OP_OF}:
                     rhs = f'({rhs})'
                 if self.data == Opcode.OP_FOUND_AT:
                     lhs, rhs = rhs, lhs
                 out += f'{lhs} {stringify(self.data)} {rhs}'
 
-            elif self.data in SINGLE_ARG_OPCODES:
+            elif self.data == Opcode.OP_FOUND:
+                out += f'{self.childs[0].pretty()}'
+            
+            elif self.data in SINGLE_ARG_HAS_PARENTHESES:
                 out += f'{stringify(self.data)}({self.childs[0].pretty()})'
+
+            elif self.data in SINGLE_ARG_NO_PARENTHESES:
+                out += f'{stringify(self.data)}{self.childs[0].pretty()}'
+
+            elif self.data == Opcode.OP_FOUND_IN:
+                string, end, begin = self.childs[0:3]
+                out += f'{string.pretty()} in ({begin.pretty()}..{end.pretty()})'
 
             elif self.data == Opcode.OP_OF:
                 n = self.childs[-1]
+                # substitute specific constant to keyword
                 if n.data[0] == 'UNDEFINED':
                     lhs = 'all'
+                elif n.data[0] == 1:
+                    lhs = 'any'
                 else:
                     lhs = n.pretty()
 
@@ -98,10 +135,25 @@ class Node:
                 else:
                     rhs = ','.join([child.data[1]['identifier'] for child in reversed(operands)])
 
-                # TODO: substitute to "them"
-                out += f'({lhs} of {rhs})'
+                out += f'{lhs} of {rhs}'
+
+            elif self.data in NO_ARG_OPCODES:
+                out += f'{stringify(self.data)}'
+
+            elif self.data == Opcode.OP_PUSH_RULE:
+                # find rule name
+                try:
+                    reference_rule = rules_table[self.childs[0].data[0]]
+                    out += f"{reference_rule.data['identifier']}"
+                except KeyError:
+                    # Unanble to find the definition of the referencing rule
+                    out += f"RULE_{self.childs[0].data[0]}"
+
             elif self.data == Opcode.OP_PUSH:
+                # Usually push should be optimized out
                 out += f'PUSH({self.childs[0].pretty()})'
+            else:
+                raise ValueError(OPCODE_UNIMPLEMENTED, self)
         return out
 
 
@@ -148,23 +200,24 @@ class YaraRule:
                     out += ' = "{str}"'.format(**string)
                 else:
                     out += ' [__unrecoverable_with_yaradec__] /* flags = %s */' % string['flags']
+#                    raise ValueError(AC_UNRECOVERABLE)
 
                 if string['flags'] & StrFlag.FULL_WORD:
                     out += ' fullword'
-                # ASCII is the default
-                # if string['flags'] & StrFlag.ASCII:
-                #    out += ' ascii'
                 if string['flags'] & StrFlag.WIDE:
                     out += ' wide'
+                    # ASCII is the default, show ascii only if wide is set
+                    if string['flags'] & StrFlag.ASCII:
+                        out += ' ascii'
                 if string['flags'] & StrFlag.NO_CASE:
                     out += ' nocase'
                 if string['flags'] & StrFlag.REGEXP:
                     out += ' regex'
                 out += '\n'
 
-        #out += self.print_asm()
-        out += self.print_decompile()
-        out += '\n'
+#        out += self.asm()
+        out += self.condition()
+        out += '\n}\n'
 
         return out
 
@@ -173,7 +226,7 @@ class YaraRule:
         stack = []
         for inst in code:
             opcode = inst['opcode']
-            if opcode in [Opcode.OP_PUSH]:
+            if opcode in {Opcode.OP_PUSH, Opcode.OP_PUSH_RULE}:
                 node = Node(opcode, 'op', self)
                 node.append(Node(inst['args'], 'val', self))
                 stack.append(node)
@@ -183,8 +236,19 @@ class YaraRule:
                 node.append(stack.pop())
                 stack.append(node)
                     
-            elif opcode in DOUBLE_ARG_OPCODES:
+            elif opcode in {*TWO_ARG_OPCODES, Opcode.OP_OFFSET}:
                 node = Node(opcode, 'op', self)
+                node.append(stack.pop())
+                node.append(stack.pop())
+                stack.append(node)
+
+            elif opcode in NO_ARG_OPCODES:
+                node = Node(opcode, 'op', self)
+                stack.append(node)
+
+            elif opcode == Opcode.OP_FOUND_IN:
+                node = Node(opcode, 'op', self)
+                node.append(stack.pop())
                 node.append(stack.pop())
                 node.append(stack.pop())
                 stack.append(node)
@@ -199,10 +263,23 @@ class YaraRule:
 
                 node.append(stack.pop())
                 stack.append(node)
+            elif opcode in IGNORED_OPCODES:
+                continue
+
+            elif opcode == Opcode.OP_MATCH_RULE:
+                node = Node(opcode, 'op', self)
+                while any(stack):
+                    node.append(stack.pop())
+                stack.append(node)
+
+            else:
+                print(self.asm())
+                raise ValueError(OPCODE_UNIMPLEMENTED, opcode)
 
         self.AST = stack.pop()
+        #print(self.AST)
 
-    def print_asm(self):
+    def asm(self):
         out = '\t__yaradec_asm__:\n'
         for val in self.data.get('code', []):
             out += '\t{:x}\t{}'.format(val['ptr'], val['opcode'].name)
@@ -218,11 +295,10 @@ class YaraRule:
                         out += ' {} '.format(x)
                 out += ')'
             out += '\n'
-        out += '}\n'
         return out
 
-    def print_decompile(self):
-        out = '\t__yaradec_decompile__:\n'
+    def condition(self):
+        out = '\tcondition:\n\t\t'
         node = self.AST
         out += node.pretty()
         return out
@@ -550,20 +626,29 @@ class v11:
         return rules
 
     def parse_rules(self) -> List[YaraRule]:
+        global rules_table
+        rules_table = {}
         self.parse()
-        rules = []
+
         cur_rule = None
+#        for val in self.code.values():
+#            print(val['opcode'], val['args'])
         for val in self.code.values():
             if val['opcode'] == Opcode.OP_INIT_RULE:
                 cur_rule = self.get_rule(val['args'][0])
                 cur_rule['code'] = []
-                rules.append(YaraRule(cur_rule))
+
+                rules_table[cur_rule['ptr']] = YaraRule(cur_rule)
             elif val['opcode'] == Opcode.OP_HALT:
                 break
+            elif val['opcode'] == Opcode.OP_IMPORT:
+                continue
+#                raise ValueError(IMPORT_UNINPLEMENTED)
+
             cur_rule['code'].append(val)
 
-        for rule in rules:
+        for rule in rules_table.values():
             rule.build_AST()
             rule.optimize()
 
-        return rules
+        return list(rules_table.values())

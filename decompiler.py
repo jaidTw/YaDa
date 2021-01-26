@@ -2,6 +2,7 @@ from typing import List
 from collections import OrderedDict
 import io
 import struct
+import json
 
 from utils import unpack, unpack2, IMPORT_UNINPLEMENTED, OPCODE_UNIMPLEMENTED, AC_UNRECOVERABLE
 from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
@@ -59,19 +60,14 @@ class Node:
     def append(self, n):
         self.childs.append(n)
 
-    def __str__(self):
-        """
-        Print underlying tree structure
-        """
-        if self.type == 'val':
-            out = str(self.data[0])
-        else:
-            out = str(self.data)
-            out += f' childs={self.childs}'
-        return f'<Node {out}>'
-
     def __repr__(self):
         return str(self)
+
+    def __str__(self):
+        if self.type == 'val':
+            return f'{{"data": {json.dumps(self.data, default=str)}}}'
+        else:
+            return f'{{"data": "{str(self.data)}", "childs": {self.childs}}}'
 
     def pretty(self):
         out = ''
@@ -141,7 +137,6 @@ class Node:
                 out += f'{stringify(self.data)}'
 
             elif self.data == Opcode.OP_PUSH_RULE:
-                # find rule name
                 try:
                     reference_rule = rules_table[self.childs[0].data[0]]
                     out += f"{reference_rule.data['identifier']}"
@@ -278,6 +273,9 @@ class YaraRule:
 
         self.AST = stack.pop()
         #print(self.AST)
+
+    def json(self):
+        return str(self.AST)
 
     def asm(self):
         out = '\t__yaradec_asm__:\n'

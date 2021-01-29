@@ -4,7 +4,7 @@ import io
 import struct
 
 from utils import unpack, unpack2
-from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES
+from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH
 
 OPTIONS_OUTPUT_ASM = True
 OPTIONS_OUTPUT_TREE = True
@@ -308,7 +308,7 @@ class v11:
         if not self.relocate(stream):
             raise RuntimeError('Invalid file')
 
-        self.version, self.rules, self.externals, self.code_start, self.automation = unpack(self.data, '<LQQQQ')
+        self.version, self.rules, self.externals, self.code_start, self.automaton = unpack(self.data, '<LQQQQ')
 
     def relocate(self, stream):
         try:
@@ -641,3 +641,50 @@ class v11:
             rule.optimize()
 
         return rules
+
+    def parse_automaton(self):
+        buf = self.data.getbuffer()
+        self.automaton_addr_map = addr_map = {}
+        root = unpack2(buf, self.automaton, 'Q')[0]
+        queue = [root]
+        self.automaton_root = addr_map.setdefault(root, {})
+
+        while queue:
+            addr = queue.pop(0)
+            node = addr_map.setdefault(addr, {})
+            if node: # visited?
+                continue
+            if not addr:
+                continue
+
+            depth, failure, matches, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+            node['addr'] = addr
+            node['depth'] = depth
+            node['failure'] = failure
+            node['matches'] = matches
+            node['transitions'] = T = {}
+
+            if depth <= MAX_TABLE_BASED_STATES_DEPTH: # array-based
+                for i, addr in enumerate(transitions):
+                    if addr:
+                        T[bytes([i])] = addr_map.setdefault(addr, {})
+                        queue.append(addr)
+
+            else: # list-based
+                '''
+                typedef struct _YR_AC_STATE_TRANSITION
+                {
+                  uint8_t input;
+
+                  DECLARE_REFERENCE(YR_AC_STATE*, state);
+                  DECLARE_REFERENCE(struct _YR_AC_STATE_TRANSITION*, next);
+
+                } YR_AC_STATE_TRANSITION;
+                '''
+                t = transitions[0]
+                while t:
+                    input_byte, state, next_t = unpack2(buf, t, '<BQQ')
+                    if state:
+                        T[bytes([input_byte])] = addr_map.setdefault(state, {})
+                        queue.append(state)
+                    t = next_t

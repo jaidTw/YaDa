@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+from pprint import pprint
 import sys
 
 from utils import unpack
@@ -61,6 +62,9 @@ def main():
 
     print('/* Decompile %d/%d rules */' % (cnt - unrecoverable, cnt))
     print('// vim: ft=yara')
+
+    dec.parse_automaton()
+    pprint(dec.automaton_root)
 
     #for addr, opcode, args in dec.disasm():
     #    print('%.8x: %-10s %r' % (addr, opcode, args))

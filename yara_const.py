@@ -169,8 +169,13 @@ SINGLE_ARG_OPCODES = {
 }
 
 TWO_ARG_OPCODES = {
+    Opcode.OP_SHL,
+    Opcode.OP_SHR,
     Opcode.OP_OR,
     Opcode.OP_AND,
+    Opcode.OP_BITWISE_OR,
+    Opcode.OP_BITWISE_AND,
+    Opcode.OP_BITWISE_XOR,
     Opcode.OP_INT_EQ,
     Opcode.OP_INT_NEQ,
     Opcode.OP_INT_LT,
@@ -181,6 +186,16 @@ TWO_ARG_OPCODES = {
     Opcode.OP_INT_SUB,
     Opcode.OP_INT_MUL,
     Opcode.OP_INT_DIV,
+    Opcode.OP_DBL_EQ,
+    Opcode.OP_DBL_NEQ,
+    Opcode.OP_DBL_LT,
+    Opcode.OP_DBL_GT,
+    Opcode.OP_DBL_LE,
+    Opcode.OP_DBL_GE,
+    Opcode.OP_DBL_ADD,
+    Opcode.OP_DBL_SUB,
+    Opcode.OP_DBL_MUL,
+    Opcode.OP_DBL_DIV,
     Opcode.OP_FOUND_AT,
 }
 

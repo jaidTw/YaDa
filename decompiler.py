@@ -13,6 +13,8 @@ rules_table = {}
 
 def stringify(op):
     TABLE = {
+        Opcode.OP_SHL: '>>',
+        Opcode.OP_SHR: '<<',
         Opcode.OP_INT_EQ: '==',
         Opcode.OP_INT_NEQ: '!=',
         Opcode.OP_INT_LT: '<',
@@ -23,12 +25,36 @@ def stringify(op):
         Opcode.OP_INT_SUB: '-',
         Opcode.OP_INT_MUL: '*',
         Opcode.OP_INT_DIV: '/',
-        Opcode.OP_INT_MINUS: '-',
+        Opcode.OP_DBL_EQ: '==',
+        Opcode.OP_DBL_NEQ: '!=',
+        Opcode.OP_DBL_LT: '<',
+        Opcode.OP_DBL_GT: '>',
+        Opcode.OP_DBL_LE: '<=',
+        Opcode.OP_DBL_GE: '>=',
+        Opcode.OP_DBL_ADD: '+',
+        Opcode.OP_DBL_SUB: '-',
+        Opcode.OP_DBL_MUL: '*',
+        Opcode.OP_DBL_DIV: '/',
+        Opcode.OP_DBL_MINUS: '-',
         Opcode.OP_NOT: 'not ',
-        Opcode.OP_BITWISE_NOT: '~',
         Opcode.OP_AND: 'and',
         Opcode.OP_OR: 'or',
+        Opcode.OP_BITWISE_NOT: '~',
+        Opcode.OP_BITWISE_AND: '&',
+        Opcode.OP_BITWISE_OR: '|',
+        Opcode.OP_BITWISE_XOR: '^',
+        Opcode.OP_INT8: 'int8',
+        Opcode.OP_INT16: 'int16',
+        Opcode.OP_INT32: 'int32',
+        Opcode.OP_UINT8: 'uint8',
         Opcode.OP_UINT16: 'uint16',
+        Opcode.OP_UINT32: 'uint32',
+        Opcode.OP_INT8BE: 'int8be',
+        Opcode.OP_INT16BE: 'int16be',
+        Opcode.OP_INT32BE: 'int32be',
+        Opcode.OP_UINT8BE: 'uint8be',
+        Opcode.OP_UINT16BE: 'uint16be',
+        Opcode.OP_UINT32BE: 'uint32be',
         Opcode.OP_FOUND_AT: 'at',
         Opcode.OP_FILESIZE: 'filesize',
         Opcode.OP_ENTRYPOINT: 'pe.entrypoint',
@@ -629,8 +655,6 @@ class v11:
         self.parse()
 
         cur_rule = None
-#        for val in self.code.values():
-#            print(val['opcode'], val['args'])
         for val in self.code.values():
             if val['opcode'] == Opcode.OP_INIT_RULE:
                 cur_rule = self.get_rule(val['args'][0])

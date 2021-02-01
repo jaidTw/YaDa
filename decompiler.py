@@ -151,7 +151,7 @@ class Node:
                 if len(operands) == len(self.rule.data['strings']):
                     rhs = 'them' # TODO: more check
                 else:
-                    rhs = ', '.join([child.data[1]['identifier'] for child in reversed(operands)])
+                    rhs = '(%s)' % ', '.join([child.data[1]['identifier'] for child in reversed(operands)])
 
                 out += f'({lhs} of {rhs})'
         else: # not op, not val?

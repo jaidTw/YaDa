@@ -304,6 +304,7 @@ class v11:
         self.size = size
         self.data = io.BytesIO(stream.read(size))
         self.code = OrderedDict()
+        self.addr_string_map = {}
 
         if not self.relocate(stream):
             raise RuntimeError('Invalid file')
@@ -639,15 +640,16 @@ class v11:
         for rule in rules:
             rule.build_AST()
             rule.optimize()
+            self.addr_string_map.update(rule.data['strings_map'])
 
         return rules
 
     def parse_automaton(self):
         buf = self.data.getbuffer()
         self.automaton_addr_map = addr_map = {}
-        root = unpack2(buf, self.automaton, 'Q')[0]
-        queue = [root]
-        self.automaton_root = addr_map.setdefault(root, {})
+        root_addr = unpack2(buf, self.automaton, 'Q')[0]
+        queue = [root_addr]
+        self.automaton_root = root = addr_map.setdefault(root_addr, {})
 
         while queue:
             addr = queue.pop(0)
@@ -657,7 +659,36 @@ class v11:
             if not addr:
                 continue
 
-            depth, failure, matches, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+            depth, failure, match_ptr, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+
+            matches = []
+            while match_ptr:
+                '''
+                typedef struct _YR_AC_MATCH
+                {
+                  uint16_t backtrack;
+
+                  DECLARE_REFERENCE(YR_STRING*, string);
+                  DECLARE_REFERENCE(uint8_t*, forward_code);
+                  DECLARE_REFERENCE(uint8_t*, backward_code);
+                  DECLARE_REFERENCE(struct _YR_AC_MATCH*, next);
+
+                } YR_AC_MATCH;
+                '''
+                backtrack, string, forward_code, backward_code, next_match_ptr = unpack2(buf, match_ptr, '<HQQQQ')
+                string_obj = self.addr_string_map[string]
+                if not string_obj['str']:
+                    string_obj.setdefault('ac_ref_count', 0)
+                    string_obj['ac_ref_count'] += 1
+                    matches.append(dict(
+                        ptr=match_ptr,
+                        backtrack=backtrack,
+                        string=string_obj,
+                        forward_code=forward_code,
+                        backward_code=backward_code,
+                        ))
+                match_ptr = next_match_ptr
+
             node['addr'] = addr
             node['depth'] = depth
             node['failure'] = failure
@@ -688,3 +719,11 @@ class v11:
                         T[bytes([input_byte])] = addr_map.setdefault(state, {})
                         queue.append(state)
                     t = next_t
+
+        def eliminate_empty_tail(node):
+            for key, child in list(node['transitions'].items()):
+                eliminate_empty_tail(child)
+                if not child['matches'] and not child['transitions']:
+                    node['transitions'].pop(key, None)
+
+        eliminate_empty_tail(root)

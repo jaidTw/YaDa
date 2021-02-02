@@ -52,9 +52,20 @@ def main():
     rules = dec.parse_rules()
     for rule in rules:
         print(rule)
+
+    # ptr -> (id, rule_name)
+    str_table = {}
+    for rule in rules:
+        for i, v in rule.data['strings'].items():
+            str_table[v['ptr']] = (i, rule.data['identifier'])
     print('Extraced regular expressions:')
+    #(re, matches[match0, match1 ...])
     for re, matches in dec.REs:
-        print(repr(re).ljust(25), ', '.join([match['string']['identifier']+':'+hex(match['string']['ptr']) for match in matches]))
+        print(repr(re).ljust(25), 'Used by:', 
+                ', '.join([ str_table[match['string']['ptr']][1]+ ':' + 
+                     match['string']['identifier'] for match in matches]
+                    )
+                )
 
 if __name__ == '__main__':
     main()

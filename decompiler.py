@@ -3,6 +3,7 @@ from collections import OrderedDict
 import io
 import struct
 import json
+from itertools import product
 
 from utils import unpack, unpack2
 from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
@@ -113,42 +114,41 @@ def AC_to_RE(root, start=1):
     n = graph['N']
     re_table = [[[None for _ in range(n+1)] for _ in range(n+1)] for _ in range(n+1)]
 
-    for k in range(n+1):
-        for i in range(1, n+1):
-            for j in range(1, n+1):
-                if k == 0:
-                    r = None
-                    if i == j:
-                        r = EPSILON
-                    elif i in graph:
-                        for sym, state in graph[i].items():
-                            if state == j:
-                                r = sym
+    for k, i, j in product(range(n+1), range(1, n+1), range(1,n+1)):
+        if k == 0:
+            r = None
+            if i == j:
+                r = EPSILON
+            elif i in graph:
+                for sym, state in graph[i].items():
+                    if state == j:
+                        r = sym
+                        break
+        else:
+            # R[i,j,k,] = R[i,j,k-1] + R[i,k,k-1](R[k,k,k-1])*R[k,j,k-1]
+            r = re_table[k-1][i][j]
+            s = None
+            
+            re1, re2, re3 = re_table[k-1][i][k], re_table[k-1][k][k], re_table[k-1][k][j]
+            if re1 != None and re2 != None and re3 != None:
+                if re2 != EPSILON:
+                    if len(re2) > 1:
+                        re2 = b'(' + re2 + b')'
+                    s = re1 + re2 + b'*' + re3
                 else:
-                    # Rij^k = Rij^k-1 + R
-                    r = re_table[k-1][i][j]
-                    s = None
-                   
-                    re1, re2, re3 = re_table[k-1][i][k], re_table[k-1][k][k], re_table[k-1][k][j]
-                    if re1 != None and re2 != None and re3 != None:
-                        if re2 != EPSILON:
-                            if len(re2) > 1:
-                                re2 = b'(' + re2 + b')'
-                            s = re1 + re2 + b'*' + re3
-                        else:
-                            if re1 == EPSILON and re3 == EPSILON:
-                                s = EPSILON
-                            else:
-                                s = re1 + re3
+                    if re1 == EPSILON and re3 == EPSILON:
+                        s = EPSILON
+                    else:
+                        s = re1 + re3
 
-                    if r == None:
-                        r = s
-                    elif r != s and s != None:
-                        if len(r) > 1:
-                            r = b'(' + r + b')'
-                        r = r + b'|' + s
-                
-                re_table[k][i][j]= r
+            if r == None:
+                r = s
+            elif r != s and s != None:
+                if len(r) > 1:
+                    r = b'(' + r + b')'
+                r = r + b'|' + s
+        
+        re_table[k][i][j]= r
 
     return [(re_table[n][start][j], *inf) for j, *inf in accept]
 

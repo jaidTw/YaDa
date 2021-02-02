@@ -5,6 +5,7 @@ import sys
 
 from utils import unpack
 import decompiler
+from pprint import pprint
 
 decoders = {
     8: decompiler.v11,
@@ -51,9 +52,9 @@ def main():
     rules = dec.parse_rules()
     for rule in rules:
         print(rule)
-
-    #for addr, opcode, args in dec.disasm():
-    #    print('%.8x: %-10s %r' % (addr, opcode, args))
+    print('Extraced regular expressions:')
+    for re, matches in dec.REs:
+        print(repr(re).ljust(25), ', '.join([match['string']['identifier']+':'+hex(match['string']['ptr']) for match in matches]))
 
 if __name__ == '__main__':
     main()

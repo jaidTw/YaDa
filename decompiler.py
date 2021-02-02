@@ -4,12 +4,29 @@ import io
 import struct
 import json
 
-from utils import unpack, unpack2, IMPORT_UNINPLEMENTED, OPCODE_UNIMPLEMENTED, AC_UNRECOVERABLE
+from utils import unpack, unpack2
 from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
 from yara_const import NO_ARG_OPCODES, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, IGNORED_OPCODES
-from yara_const import SINGLE_ARG_NO_PARENTHESES, SINGLE_ARG_HAS_PARENTHESES
+from yara_const import SINGLE_ARG_NO_PARENTHESES, SINGLE_ARG_HAS_PARENTHESES, MAX_TABLE_BASED_STATES_DEPTH
 
 rules_table = {}
+
+
+OPTIONS_OUTPUT_ASM = False
+OPTIONS_OUTPUT_TREE = False
+
+class DecompileError(Exception):
+    pass
+
+def escape_str(s):
+    return '"%s"' % (s
+            .replace('\\', '\\\\')
+            .replace('\0', '\\0')
+            .replace('\n', '\\n')
+            .replace('\r', '\\r')
+            .replace('\t', '\\t')
+            .replace('"', '\\"'))
+
 
 def stringify(op):
     TABLE = {
@@ -73,6 +90,68 @@ def optimize_walk(node):
 
     for child in node.childs:
         optimize_walk(child)
+
+def AC_to_RE(root, start=1):
+    EPSILON = b''
+    def _flatten(state, graph):
+        state_id = graph['N']
+        if len(state['matches']) > 0:
+            graph['ac'].append((state_id, state['matches']))
+        for sym, to in state['transitions'].items():
+            dfs_no = graph['N']
+            if not state_id in graph:
+                graph[state_id] = {sym: dfs_no  + 1}
+            else:
+                graph[state_id][sym] = dfs_no + 1
+            graph['N'] += 1
+            _flatten(to, graph)
+
+    graph = {'N': 1, 'ac': []}
+    _flatten(root, graph)
+
+    accept = graph['ac']
+    n = graph['N']
+    re_table = [[[None for _ in range(n+1)] for _ in range(n+1)] for _ in range(n+1)]
+
+    for k in range(n+1):
+        for i in range(1, n+1):
+            for j in range(1, n+1):
+                if k == 0:
+                    r = None
+                    if i == j:
+                        r = EPSILON
+                    elif i in graph:
+                        for sym, state in graph[i].items():
+                            if state == j:
+                                r = sym
+                else:
+                    # Rij^k = Rij^k-1 + R
+                    r = re_table[k-1][i][j]
+                    s = None
+                   
+                    re1, re2, re3 = re_table[k-1][i][k], re_table[k-1][k][k], re_table[k-1][k][j]
+                    if re1 != None and re2 != None and re3 != None:
+                        if re2 != EPSILON:
+                            if len(re2) > 1:
+                                re2 = b'(' + re2 + b')'
+                            s = re1 + re2 + b'*' + re3
+                        else:
+                            if re1 == EPSILON and re3 == EPSILON:
+                                s = EPSILON
+                            else:
+                                s = re1 + re3
+
+                    if r == None:
+                        r = s
+                    elif r != s and s != None:
+                        if len(r) > 1:
+                            r = b'(' + r + b')'
+                        r = r + b'|' + s
+                
+                re_table[k][i][j]= r
+
+    return [(re_table[n][start][j], *inf) for j, *inf in accept]
+
 
 class Node:
     def __init__(self, data, type, rule):
@@ -153,9 +232,9 @@ class Node:
 
                 operands = self.childs[0:-2]
                 if len(operands) == len(self.rule.data['strings']):
-                    rhs = 'them'
+                    rhs = 'them' # TODO: more check
                 else:
-                    rhs = ','.join([child.data[1]['identifier'] for child in reversed(operands)])
+                    rhs = ', '.join([child.data[1]['identifier'] for child in reversed(operands)])
 
                 out += f'{lhs} of {rhs}'
 
@@ -174,7 +253,7 @@ class Node:
                 # Usually push should be optimized out
                 out += f'PUSH({self.childs[0].pretty()})'
             else:
-                raise ValueError(OPCODE_UNIMPLEMENTED, self)
+                raise DecompileError(self)
         return out
 
 
@@ -183,14 +262,12 @@ class YaraRule:
         self.data = data
         self.data.setdefault('strings', OrderedDict())
 
-    def __get_strings(self):
         strings_ptr_set = self.data.setdefault('strings_ptr_set', set())
-        for s in self.data.get('_strings'):
+        for s in self.data.get('strings_list'):
             self.data['strings'][s['identifier']] = s
             strings_ptr_set.add(s['ptr'])
 
     def __str__(self):
-        self.__get_strings()
         out = ''
         if self.data['flags'] & RuleFlag.PRIVATE:
             out += 'private '
@@ -213,15 +290,14 @@ class YaraRule:
         if self.data.get('strings'):
             out += '\tstrings:\n'
             for string in self.data['strings'].values():
-                out += '\t/*{ptr:x}*/\t{identifier}'.format(**string)
+                out += '\t/*0x{ptr:x}*/\t{identifier}'.format(**string)
 
                 if string['flags'] & StrFlag.HEXADECIMAL and string['flags'] & StrFlag.LITERAL:
                     out += ' = {str}'.format(**string)
                 elif string['flags'] & StrFlag.LITERAL:
-                    out += ' = "{str}"'.format(**string)
+                    out += ' = ' + escape_str(string['str'])
                 else:
-                    out += ' [__unrecoverable_with_yaradec__] /* flags = %s */' % string['flags']
-#                    raise ValueError(AC_UNRECOVERABLE)
+                    out += ' = /UNRECOVERABLE_REGEXP/ /* regex is unrecoverable right now. flags = %s */' % string['flags']
 
                 if string['flags'] & StrFlag.FULL_WORD:
                     out += ' fullword'
@@ -295,7 +371,7 @@ class YaraRule:
 
             else:
                 print(self.asm())
-                raise ValueError(OPCODE_UNIMPLEMENTED, opcode)
+                raise DecompileError(opcode)
 
         self.AST = stack.pop()
         #print(self.AST)
@@ -328,7 +404,8 @@ class YaraRule:
         return out
 
     def optimize(self):
-        optimize_walk(self.AST)
+        if self.AST:
+            optimize_walk(self.AST)
 
 
 class v11:
@@ -336,11 +413,12 @@ class v11:
         self.size = size
         self.data = io.BytesIO(stream.read(size))
         self.code = OrderedDict()
+        self.addr_string_map = {}
 
         if not self.relocate(stream):
             raise RuntimeError('Invalid file')
 
-        self.version, self.rules, self.externals, self.code_start, self.automation = unpack(self.data, '<LQQQQ')
+        self.version, self.rules, self.externals, self.code_start, self.automaton = unpack(self.data, '<LQQQQ')
 
     def relocate(self, stream):
         try:
@@ -457,6 +535,90 @@ class v11:
         self.code[ip] = dict(ptr=ip, next=next, opcode=opcode, args=args)
         return next
 
+    def parse_automaton(self):
+        buf = self.data.getbuffer()
+        self.automaton_addr_map = addr_map = {}
+        root_addr = unpack2(buf, self.automaton, 'Q')[0]
+        queue = [root_addr]
+        self.automaton_root = root = addr_map.setdefault(root_addr, {})
+
+        while queue:
+            addr = queue.pop(0)
+            node = addr_map.setdefault(addr, {})
+            if node: # visited?
+                continue
+            if not addr:
+                continue
+
+            depth, failure, match_ptr, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+
+            matches = []
+            while match_ptr:
+                '''
+                typedef struct _YR_AC_MATCH
+                {
+                  uint16_t backtrack;
+
+                  DECLARE_REFERENCE(YR_STRING*, string);
+                  DECLARE_REFERENCE(uint8_t*, forward_code);
+                  DECLARE_REFERENCE(uint8_t*, backward_code);
+                  DECLARE_REFERENCE(struct _YR_AC_MATCH*, next);
+
+                } YR_AC_MATCH;
+                '''
+                backtrack, string, forward_code, backward_code, next_match_ptr = unpack2(buf, match_ptr, '<HQQQQ')
+                string_obj = self.addr_string_map[string]
+                if not string_obj['str']:
+                    string_obj.setdefault('ac_ref_count', 0)
+                    string_obj['ac_ref_count'] += 1
+                    matches.append(dict(
+                        ptr=match_ptr,
+                        backtrack=backtrack,
+                        string=string_obj,
+                        forward_code=forward_code,
+                        backward_code=backward_code,
+                        ))
+                match_ptr = next_match_ptr
+
+            node['addr'] = addr
+            node['depth'] = depth
+            node['failure'] = failure
+            node['matches'] = matches
+            node['transitions'] = T = {}
+
+            if depth <= MAX_TABLE_BASED_STATES_DEPTH: # array-based
+                for i, addr in enumerate(transitions):
+                    if addr:
+                        T[bytes([i])] = addr_map.setdefault(addr, {})
+                        queue.append(addr)
+
+            else: # list-based
+                '''
+                typedef struct _YR_AC_STATE_TRANSITION
+                {
+                  uint8_t input;
+
+                  DECLARE_REFERENCE(YR_AC_STATE*, state);
+                  DECLARE_REFERENCE(struct _YR_AC_STATE_TRANSITION*, next);
+
+                } YR_AC_STATE_TRANSITION;
+                '''
+                t = transitions[0]
+                while t:
+                    input_byte, state, next_t = unpack2(buf, t, '<BQQ')
+                    if state:
+                        T[bytes([input_byte])] = addr_map.setdefault(state, {})
+                        queue.append(state)
+                    t = next_t
+
+        def eliminate_empty_tail(node):
+            for key, child in list(node['transitions'].items()):
+                eliminate_empty_tail(child)
+                if not child['matches'] and not child['transitions']:
+                    node['transitions'].pop(key, None)
+
+        eliminate_empty_tail(root)
+
     def get_raw_str(self, addr):
         if not addr:
             return None
@@ -511,14 +673,12 @@ class v11:
         return '{}:'.format(ns) if ns else ''
 
     def get_strings(self, addr):
-        strings = []
         while True:
             string = self.get_string(addr)
             if not string:
                 break
-            strings.append(string)
+            yield string
             addr += 4 * 4 + 8 * 4 + (20*_MAX_THREADS*2)
-        return strings
 
     def get_string(self, addr):
         '''
@@ -620,9 +780,11 @@ class v11:
             data['ns'] = self.get_ns(ns)
 
         if strings:
-            data['_strings'] = self.get_strings(strings)
+            data['strings_list'] = list(self.get_strings(strings))
+            data['strings_map'] = { s['ptr']: s for s in data['strings_list'] }
         else:
-            data['_strings'] = []
+            data['strings_list'] = []
+            data['strings_map'] = {}
 
         return data
 
@@ -636,41 +798,42 @@ class v11:
             ip = todo.pop()
             todo += self.get_code(buf, ip)
 
-    def get_rules_easy(self):
-        rules = []
+    def get_rules(self):
         i = 0
         while True:
             c = self.get_rule(self.rules + i * 0xac)
             if not c: break
             i += 1
-            c['ns'] = ''
             c['code'] = []
-            rules.append(YaraRule(c))
-
-        return rules
+            yield YaraRule(c)
 
     def parse_rules(self) -> List[YaraRule]:
         global rules_table
+        rules = list(self.get_rules())
         rules_table = {}
+        addr_rules_map = { r.data['ptr']: r for r in rules }
         self.parse()
 
         cur_rule = None
         for val in self.code.values():
             if val['opcode'] == Opcode.OP_INIT_RULE:
-                cur_rule = self.get_rule(val['args'][0])
-                cur_rule['code'] = []
+                cur_rule = addr_rules_map[val['args'][0]]
 
-                rules_table[cur_rule['ptr']] = YaraRule(cur_rule)
+                rules_table[cur_rule.data['ptr']] = cur_rule
             elif val['opcode'] == Opcode.OP_HALT:
                 break
             elif val['opcode'] == Opcode.OP_IMPORT:
                 continue
-#                raise ValueError(IMPORT_UNINPLEMENTED)
 
-            cur_rule['code'].append(val)
+            cur_rule.data['code'].append(val)
 
         for rule in rules_table.values():
             rule.build_AST()
             rule.optimize()
+            self.addr_string_map.update(rule.data['strings_map'])
+
+        self.parse_automaton()
+        
+        self.REs = AC_to_RE(self.automaton_root)
 
         return list(rules_table.values())

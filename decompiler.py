@@ -4,7 +4,7 @@ import io
 import struct
 
 from utils import unpack, unpack2
-from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH
+from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, DOUBLE_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH, RegexpOpcode
 
 OPTIONS_OUTPUT_ASM = True
 OPTIONS_OUTPUT_TREE = True
@@ -330,6 +330,44 @@ class v11:
             print("Invalid file (bad relocs)")
             return False
         return True
+
+    def regexp_disasm(self, ip):
+        buf = self.data.getbuffer()
+        #print('--- BEGIN REGEXP DISASM AT 0x%.8x ---' % ip)
+
+        while True:
+            opcode = RegexpOpcode(unpack2(buf, ip, '<B')[0])
+            ip_inc = 1
+            args = []
+
+            if opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+                ip_inc = 2
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+            elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+                args.append(unpack2(buf, ip + 2, '<B')[0])
+            elif opcode == RegexpOpcode.RE_OPCODE_SPLIT_B:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+                args.append(unpack2(buf, ip + 2, '<B')[0])
+            elif opcode == RegexpOpcode.RE_OPCODE_PUSH:
+                args.append(unpack2(buf, ip + 1, '<H')[0])
+                args.append(unpack2(buf, ip + 3, '<Q')[0])
+                ip_inc = 11
+            elif opcode in [RegexpOpcode.RE_OPCODE_ANY]:
+                pass
+            elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
+                pass
+
+            args_str = ' '.join('0x%x' % i for i in args)
+            #print('0x%.8x (%-9d): %-24s %s' % (ip, ip, opcode, args_str))
+            yield ip, opcode, args
+            ip += ip_inc
+
+            if opcode == RegexpOpcode.RE_OPCODE_MATCH:
+                break
+
 
     def _disasm(self, ip):
         self.data.seek(ip)
@@ -680,13 +718,19 @@ class v11:
                 if not string_obj['str']:
                     string_obj.setdefault('ac_ref_count', 0)
                     string_obj['ac_ref_count'] += 1
-                    matches.append(dict(
+                    match_obj = dict(
                         ptr=match_ptr,
                         backtrack=backtrack,
                         string=string_obj,
                         forward_code=forward_code,
                         backward_code=backward_code,
-                        ))
+                        )
+                    if string_obj['flags'] & StrFlag.FAST_HEX_REGEXP:
+                        match_obj.update(dict(
+                            forward_code_asm=list(self.regexp_disasm(forward_code)),
+                            backward_code_asm=list(self.regexp_disasm(backward_code)),
+                            ))
+                    matches.append(match_obj)
                 match_ptr = next_match_ptr
 
             node['addr'] = addr

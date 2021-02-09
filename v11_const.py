@@ -282,3 +282,8 @@ SPLIT_OPCODES = {
     RegexpOpcode.RE_OPCODE_SPLIT_A,
     RegexpOpcode.RE_OPCODE_SPLIT_B
 }
+
+CLASS_OPCODES = {
+    RegexpOpcode.RE_OPCODE_CLASS,
+    RegexpOpcode.RE_OPCODE_CLASS_NO_CASE,
+}

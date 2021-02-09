@@ -903,26 +903,27 @@ class decompiler:
         buf = self.data.getbuffer()
         self.automaton_addr_map = addr_map = {}
         # Actually we only need the match_table
-        match_table = {}
+        match_list = []
 
         for i in range(self.ac_tables_size):
             addr = unpack2(buf, self.ac_match_table + i * 8, '<Q')[0]
             if addr != 0:
                 backtrack, string, forward_code, backward_code, nxt = unpack2(buf, addr, '<QQQQQ')
-                match_table[i] = {
+                fwcode, bwcode = [], []
+                if forward_code != 0:
+                    fwcode = list(self.regexp_disasm(forward_code))
+                if backward_code != 0:
+                    bwcode = list(self.regexp_disasm(backward_code))
+                match_list.append({
                     'backtrack': backtrack,
                     'string': self.get_string(string),
-                    'forward_code': [],
-                    'backward_code': [],
+                    'forward_code': fwcode,
+                    'backward_code': bwcode,
                     'next': nxt
-                }
-                if forward_code != 0:
-                    match_table[i]['forward_code'] = list(self.regexp_disasm(forward_code))
-                if backward_code != 0:
-                    match_table[i]['backward_code'] = list(self.regexp_disasm(backward_code))
+                })
 
         REs = []
-        for match in match_table.values():
+        for match in match_list:
             ptr = match['string']['ptr']
             re = decompile_RE(match['forward_code'], match['backward_code'], match['string']['flags'])
             REs.append((ptr, re))

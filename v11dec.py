@@ -6,7 +6,7 @@ from utils import unpack, unpack2
 import io
 import struct
 import json
-from v11_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH, RegexpOpcode, NO_ARG_OPCODES, IGNORED_OPCODES, SINGLE_ARG_HAS_PARENTHESES, SINGLE_ARG_NO_PARENTHESES, SPLIT_OPCODES
+from v11_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH, RegexpOpcode, NO_ARG_OPCODES, IGNORED_OPCODES, SINGLE_ARG_HAS_PARENTHESES, SINGLE_ARG_NO_PARENTHESES, SPLIT_OPCODES, CLASS_OPCODES
 
 OPTIONS_OUTPUT_ASM = False
 OPTIONS_OUTPUT_TREE = False
@@ -23,23 +23,6 @@ def escape_str(s):
             .replace('\r', '\\r')
             .replace('\t', '\\t')
             .replace('"', '\\"'))
-
-
-OPTIONS_OUTPUT_ASM = False
-OPTIONS_OUTPUT_TREE = False
-
-class DecompileError(Exception):
-    pass
-
-def escape_str(s):
-    return '"%s"' % (s
-            .replace('\\', '\\\\')
-            .replace('\0', '\\0')
-            .replace('\n', '\\n')
-            .replace('\r', '\\r')
-            .replace('\t', '\\t')
-            .replace('"', '\\"'))
-
 
 def stringify(op):
     TABLE = {
@@ -105,7 +88,7 @@ def _decompile_RE_fast(code):
         _, opcode, args = code[i]
         if opcode == RegexpOpcode.RE_OPCODE_ANY:
             pattern.append('??')
-        elif opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+        elif opcode in [RegexpOpcode.RE_OPCODE_LITERAL, RegexpOpcode.RE_OPCODE_LITERAL_NO_CASE]:
             pattern.append('%02x' % args[0])
         elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
             if args[1] == 0xf0:
@@ -155,7 +138,7 @@ def _decompile_RE_fast(code):
 
     return pattern
 
-def _decompile_RE_range(code, start, end):
+def _decompile_RE_range(code, start, end, backward=0):
     pattern = []
     i = start
     while i < end:
@@ -164,7 +147,7 @@ def _decompile_RE_range(code, start, end):
             pattern.append('.')
         elif opcode == RegexpOpcode.RE_OPCODE_ANY_EXCEPT_NEW_LINE:
             pattern.append('.')
-        elif opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+        elif opcode in [RegexpOpcode.RE_OPCODE_LITERAL, RegexpOpcode.RE_OPCODE_LITERAL_NO_CASE]:
             pattern.append(bytes([args[0]]).decode('latin1'))
         elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
             if args[1] == 0xf0:
@@ -178,11 +161,19 @@ def _decompile_RE_range(code, start, end):
             j = i - 1
             while not code[j][1] in SPLIT_OPCODES:
                 j -= 1
-                pattern.pop()
+                try:
+                    pattern.pop()
+                except IndexError:
+                    for c in code:
+                        print(c)
+                    exit()
             # get the repeat part
-            subpattern = _decompile_RE_range(code, j, i)
+            subpattern = _decompile_RE_range(code, j, i, backward)
             if len(subpattern) > 1:
-                pattern.append('(%s)*' % ''.join(subpattern))
+                if backward:
+                    pattern.append('(%s)*' % ''.join(reversed(subpattern)))
+                else:
+                    pattern.append('(%s)*' % ''.join(subpattern))
             elif len(subpattern) == 0:
                 pattern.append('[Unsupported]')
             else:
@@ -207,7 +198,7 @@ def _decompile_RE_range(code, start, end):
             while code[j][1] != RegexpOpcode.RE_OPCODE_JNZ:
                 j += 1
             sub_len = j - (i + 2)
-            subpattern = _decompile_RE_range(code, i + 2, j)
+            subpattern = _decompile_RE_range(code, i + 2, j, backward)
 
             # count # of repeat part before the loop
             n = 0
@@ -224,11 +215,21 @@ def _decompile_RE_range(code, start, end):
             i = j + 2 + sub_len
             
         elif opcode in [RegexpOpcode.RE_OPCODE_CLASS, RegexpOpcode.RE_OPCODE_CLASS_NO_CASE]:
-            pass
+            cls = args[0]
+            # Look Fowrward for repetition?
+            j = i + 1
+            while code[j][1] in {RegexpOpcode.RE_OPCODE_CLASS, RegexpOpcode.RE_OPCODE_CLASS_NO_CASE} and code[j][2][0] == cls:
+                j += 1
+            if (j - i) > 1:
+                cls = f'[{cls}]{{{j - i}}}'
+            else:
+                cls = f'[{cls}]'
+            pattern.append(cls)
+            i = j - 1
         elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
             break
         else:
-            raise DecompileError('Impossible opcode met in _decompile_RE_fast:', opcode)
+            raise DecompileError('Impossible opcode met in _decompile_RE_range:', opcode)
         i += 1
     return pattern
 
@@ -242,16 +243,16 @@ def decompile_RE(fw_code, bw_code, flags):
             re = f'{{ {" ".join(fw)} }}'
     else:
         fw = _decompile_RE_range(fw_code, 0, len(fw_code))
-        bw = _decompile_RE_range(bw_code, 0, len(bw_code))
+        bw = _decompile_RE_range(bw_code, 0, len(bw_code), 1)
         re = f'/{"".join(reversed(bw))}{"".join(fw)}/'
     return re
 
-def AC_to_RE(root, start=1):
+def AC_to_RE(root):
     match_list = []
     def _extract_matches(state):
         if len(state['matches']) > 0:
-            match = state['matches'][0]
-            match_list.append(match)
+            for match in state['matches']:
+                match_list.append(match)
 
         for sym, to in state['transitions'].items():
             _extract_matches(to)
@@ -266,7 +267,6 @@ def AC_to_RE(root, start=1):
 
     return REs
 
-
 def optimize_walk(node):
     if node.type == 'val':
         return
@@ -275,73 +275,15 @@ def optimize_walk(node):
         node.type = 'val'
         node.data = node.childs[0].data
         node.childs = []
+    elif node.data == Opcode.OP_PUSH_RULE:   # eliminate push nodes
+        node.type = 'val'
+        node.data = node.childs[0].data
+        node.childs = []
 
     for child in node.childs:
         optimize_walk(child)
     if node.type == 'val':
         return
-
-
-def AC_to_RE(root, start=1):
-    EPSILON = b''
-    def _flatten(state, graph):
-        state_id = graph['N']
-        if len(state['matches']) > 0:
-            graph['ac'].append((state_id, state['matches']))
-        for sym, to in state['transitions'].items():
-            dfs_no = graph['N']
-            if not state_id in graph:
-                graph[state_id] = {sym: dfs_no  + 1}
-            else:
-                graph[state_id][sym] = dfs_no + 1
-            graph['N'] += 1
-            _flatten(to, graph)
-
-    graph = {'N': 1, 'ac': []}
-    _flatten(root, graph)
-
-    accept = graph['ac']
-    n = graph['N']
-    re_table = [[[None for _ in range(n+1)] for _ in range(n+1)] for _ in range(n+1)]
-
-    for k, i, j in product(range(n+1), range(1, n+1), range(1,n+1)):
-        if k == 0:
-            r = None
-            if i == j:
-                r = EPSILON
-            elif i in graph:
-                for sym, state in graph[i].items():
-                    if state == j:
-                        r = sym
-                        break
-        else:
-            # R[i,j,k,] = R[i,j,k-1] + R[i,k,k-1](R[k,k,k-1])*R[k,j,k-1]
-            r = re_table[k-1][i][j]
-            s = None
-            
-            re1, re2, re3 = re_table[k-1][i][k], re_table[k-1][k][k], re_table[k-1][k][j]
-            if re1 != None and re2 != None and re3 != None:
-                if re2 != EPSILON:
-                    if len(re2) > 1:
-                        re2 = b'(' + re2 + b')'
-                    s = re1 + re2 + b'*' + re3
-                else:
-                    if re1 == EPSILON and re3 == EPSILON:
-                        s = EPSILON
-                    else:
-                        s = re1 + re3
-
-            if r == None:
-                r = s
-            elif r != s and s != None:
-                if len(r) > 1:
-                    r = b'(' + r + b')'
-                r = r + b'|' + s
-        
-        re_table[k][i][j]= r
-
-    return [(re_table[n][start][j], *inf) for j, *inf in accept]
-
 
 class Node:
     def __init__(self, data, type, rule):
@@ -437,14 +379,6 @@ class Node:
             elif self.data in NO_ARG_OPCODES:
                 out += f'{stringify(self.data)}'
 
-            elif self.data == Opcode.OP_PUSH_RULE:
-                try:
-                    reference_rule = rules_table[self.childs[0].data[0]]
-                    out += f"{reference_rule.data['identifier']}"
-                except KeyError:
-                    # Unanble to find the definition of the referencing rule
-                    out += f"RULE_{self.childs[0].data[0]}"
-
             elif self.data == Opcode.OP_PUSH:
                 # Usually push should be optimized out
                 out += f'PUSH({self.childs[0].pretty()})'
@@ -510,8 +444,8 @@ class YaraRule:
                         out += ' ascii'
                 if string['flags'] & StrFlag.NO_CASE:
                     out += ' nocase'
-                if string['flags'] & StrFlag.REGEXP:
-                    out += ' regex'
+#                if string['flags'] & StrFlag.REGEXP:
+#                    out += ' regex'
                 out += '\n'
 
         if OPTIONS_OUTPUT_ASM:
@@ -649,6 +583,8 @@ class decompiler:
         return True
 
     def regexp_disasm(self, ip):
+        if ip == 0:
+            return
         buf = self.data.getbuffer()
         if OPTIONS_DUMP_RE_ASM:
             print('--- BEGIN REGEXP DISASM AT 0x%.8x ---' % ip)
@@ -658,7 +594,7 @@ class decompiler:
             ip_inc = 1
             args = []
 
-            if opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+            if opcode in [RegexpOpcode.RE_OPCODE_LITERAL, RegexpOpcode.RE_OPCODE_LITERAL_NO_CASE]:
                 ip_inc = 2
                 args.append(unpack2(buf, ip + 1, '<B')[0])
             elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
@@ -675,12 +611,33 @@ class decompiler:
             elif opcode in [RegexpOpcode.RE_OPCODE_JNZ, RegexpOpcode.RE_OPCODE_JUMP]:
                 ip_inc = 3
                 args.append(unpack2(buf, ip + 1, '<h')[0])
-            elif opcode in [
-                    RegexpOpcode.RE_OPCODE_CLASS,
-                    RegexpOpcode.RE_OPCODE_CLASS_NO_CASE,
-                    ]:
+            elif opcode in CLASS_OPCODES:
                 ip_inc = 33
-                pass
+                n = unpack2(buf, ip + 1, '<64s')[0]
+                n = int.from_bytes(n, byteorder='little')
+                # extract bit positions
+                bit_pos = []
+                for j in range(256):
+                    if n & 1 == 1:
+                        bit_pos.append(j)
+                    n >>= 1
+                # TODO: mask and reduce \w \W \s \S \d \D
+                # extract consecutive segment
+                cls = ""
+                l, r = bit_pos[0], 0
+                for j in range(len(bit_pos) - 1):
+                    if bit_pos[j + 1] != bit_pos[j] + 1:
+                        r = bit_pos[j]
+                        if r != l:
+                            cls += f'{chr(l)}-{chr(r)}'
+                        else:
+                            cls += f'{chr(l)}'
+                        l = bit_pos[j + 1]
+                if bit_pos[-1] != l:
+                    cls += f'{chr(l)}-{chr(bit_pos[-1])}'
+                else:
+                    cls += f'{chr(l)}'
+                args.append(cls)
             elif opcode in [
                     RegexpOpcode.RE_OPCODE_ANY,
                     RegexpOpcode.RE_OPCODE_POP,
@@ -692,7 +649,10 @@ class decompiler:
             else:
                 raise DecompileError('Unknown opcode' + repr(opcode))
 
-            args_str = ' '.join('0x%x' % i for i in args)
+            if opcode in CLASS_OPCODES:
+                args_str = repr(args)
+            else:
+                args_str = ' '.join('0x%x' % i for i in args)
             if OPTIONS_DUMP_RE_ASM:
                 print('0x%.8x (%-9d): %-24s %s' % (ip, ip, opcode, args_str))
             yield ip, opcode, args

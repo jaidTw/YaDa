@@ -24,6 +24,23 @@ def escape_str(s):
             .replace('\t', '\\t')
             .replace('"', '\\"'))
 
+
+OPTIONS_OUTPUT_ASM = False
+OPTIONS_OUTPUT_TREE = False
+
+class DecompileError(Exception):
+    pass
+
+def escape_str(s):
+    return '"%s"' % (s
+            .replace('\\', '\\\\')
+            .replace('\0', '\\0')
+            .replace('\n', '\\n')
+            .replace('\r', '\\r')
+            .replace('\t', '\\t')
+            .replace('"', '\\"'))
+
+
 def stringify(op):
     TABLE = {
         Opcode.OP_SHL: '>>',
@@ -263,6 +280,67 @@ def optimize_walk(node):
         optimize_walk(child)
     if node.type == 'val':
         return
+
+
+def AC_to_RE(root, start=1):
+    EPSILON = b''
+    def _flatten(state, graph):
+        state_id = graph['N']
+        if len(state['matches']) > 0:
+            graph['ac'].append((state_id, state['matches']))
+        for sym, to in state['transitions'].items():
+            dfs_no = graph['N']
+            if not state_id in graph:
+                graph[state_id] = {sym: dfs_no  + 1}
+            else:
+                graph[state_id][sym] = dfs_no + 1
+            graph['N'] += 1
+            _flatten(to, graph)
+
+    graph = {'N': 1, 'ac': []}
+    _flatten(root, graph)
+
+    accept = graph['ac']
+    n = graph['N']
+    re_table = [[[None for _ in range(n+1)] for _ in range(n+1)] for _ in range(n+1)]
+
+    for k, i, j in product(range(n+1), range(1, n+1), range(1,n+1)):
+        if k == 0:
+            r = None
+            if i == j:
+                r = EPSILON
+            elif i in graph:
+                for sym, state in graph[i].items():
+                    if state == j:
+                        r = sym
+                        break
+        else:
+            # R[i,j,k,] = R[i,j,k-1] + R[i,k,k-1](R[k,k,k-1])*R[k,j,k-1]
+            r = re_table[k-1][i][j]
+            s = None
+            
+            re1, re2, re3 = re_table[k-1][i][k], re_table[k-1][k][k], re_table[k-1][k][j]
+            if re1 != None and re2 != None and re3 != None:
+                if re2 != EPSILON:
+                    if len(re2) > 1:
+                        re2 = b'(' + re2 + b')'
+                    s = re1 + re2 + b'*' + re3
+                else:
+                    if re1 == EPSILON and re3 == EPSILON:
+                        s = EPSILON
+                    else:
+                        s = re1 + re3
+
+            if r == None:
+                r = s
+            elif r != s and s != None:
+                if len(r) > 1:
+                    r = b'(' + r + b')'
+                r = r + b'|' + s
+        
+        re_table[k][i][j]= r
+
+    return [(re_table[n][start][j], *inf) for j, *inf in accept]
 
 
 class Node:
@@ -678,6 +756,90 @@ class decompiler:
         self.code[ip] = dict(ptr=ip, next=next, opcode=opcode, args=args)
         return next
 
+    def parse_automaton(self):
+        buf = self.data.getbuffer()
+        self.automaton_addr_map = addr_map = {}
+        root_addr = unpack2(buf, self.automaton, 'Q')[0]
+        queue = [root_addr]
+        self.automaton_root = root = addr_map.setdefault(root_addr, {})
+
+        while queue:
+            addr = queue.pop(0)
+            node = addr_map.setdefault(addr, {})
+            if node: # visited?
+                continue
+            if not addr:
+                continue
+
+            depth, failure, match_ptr, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+
+            matches = []
+            while match_ptr:
+                '''
+                typedef struct _YR_AC_MATCH
+                {
+                  uint16_t backtrack;
+
+                  DECLARE_REFERENCE(YR_STRING*, string);
+                  DECLARE_REFERENCE(uint8_t*, forward_code);
+                  DECLARE_REFERENCE(uint8_t*, backward_code);
+                  DECLARE_REFERENCE(struct _YR_AC_MATCH*, next);
+
+                } YR_AC_MATCH;
+                '''
+                backtrack, string, forward_code, backward_code, next_match_ptr = unpack2(buf, match_ptr, '<HQQQQ')
+                string_obj = self.addr_string_map[string]
+                if not string_obj['str']:
+                    string_obj.setdefault('ac_ref_count', 0)
+                    string_obj['ac_ref_count'] += 1
+                    matches.append(dict(
+                        ptr=match_ptr,
+                        backtrack=backtrack,
+                        string=string_obj,
+                        forward_code=forward_code,
+                        backward_code=backward_code,
+                        ))
+                match_ptr = next_match_ptr
+
+            node['addr'] = addr
+            node['depth'] = depth
+            node['failure'] = failure
+            node['matches'] = matches
+            node['transitions'] = T = {}
+
+            if depth <= MAX_TABLE_BASED_STATES_DEPTH: # array-based
+                for i, addr in enumerate(transitions):
+                    if addr:
+                        T[bytes([i])] = addr_map.setdefault(addr, {})
+                        queue.append(addr)
+
+            else: # list-based
+                '''
+                typedef struct _YR_AC_STATE_TRANSITION
+                {
+                  uint8_t input;
+
+                  DECLARE_REFERENCE(YR_AC_STATE*, state);
+                  DECLARE_REFERENCE(struct _YR_AC_STATE_TRANSITION*, next);
+
+                } YR_AC_STATE_TRANSITION;
+                '''
+                t = transitions[0]
+                while t:
+                    input_byte, state, next_t = unpack2(buf, t, '<BQQ')
+                    if state:
+                        T[bytes([input_byte])] = addr_map.setdefault(state, {})
+                        queue.append(state)
+                    t = next_t
+
+        def eliminate_empty_tail(node):
+            for key, child in list(node['transitions'].items()):
+                eliminate_empty_tail(child)
+                if not child['matches'] and not child['transitions']:
+                    node['transitions'].pop(key, None)
+
+        eliminate_empty_tail(root)
+
     def get_raw_str(self, addr):
         if not addr:
             return None
@@ -997,5 +1159,3 @@ class decompiler:
                     node['transitions'].pop(key, None)
 
         eliminate_empty_tail(root)
-
-

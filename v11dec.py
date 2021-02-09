@@ -1,20 +1,39 @@
 from typing import List
 from collections import OrderedDict
+from itertools import product
+from utils import unpack, unpack2
+
 import io
 import struct
 import json
+from v11_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH, RegexpOpcode, NO_ARG_OPCODES, IGNORED_OPCODES, SINGLE_ARG_HAS_PARENTHESES, SINGLE_ARG_NO_PARENTHESES, SPLIT_OPCODES
 
-from utils import unpack, unpack2, IMPORT_UNINPLEMENTED, OPCODE_UNIMPLEMENTED, AC_UNRECOVERABLE
-from yara_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED
-from yara_const import NO_ARG_OPCODES, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, IGNORED_OPCODES
-from yara_const import SINGLE_ARG_NO_PARENTHESES, SINGLE_ARG_HAS_PARENTHESES
+OPTIONS_OUTPUT_ASM = False
+OPTIONS_OUTPUT_TREE = False
+OPTIONS_DUMP_RE_ASM = False
 
-rules_table = {}
+class DecompileError(Exception):
+    pass
+
+def escape_str(s):
+    return '"%s"' % (s
+            .replace('\\', '\\\\')
+            .replace('\0', '\\0')
+            .replace('\n', '\\n')
+            .replace('\r', '\\r')
+            .replace('\t', '\\t')
+            .replace('"', '\\"'))
 
 def stringify(op):
     TABLE = {
         Opcode.OP_SHL: '>>',
         Opcode.OP_SHR: '<<',
+        Opcode.OP_STR_EQ: '==',
+        Opcode.OP_STR_NEQ: '!=',
+        Opcode.OP_STR_LT: '<',
+        Opcode.OP_STR_GT: '>',
+        Opcode.OP_STR_LE: '<=',
+        Opcode.OP_STR_GE: '>=',
         Opcode.OP_INT_EQ: '==',
         Opcode.OP_INT_NEQ: '!=',
         Opcode.OP_INT_LT: '<',
@@ -25,6 +44,7 @@ def stringify(op):
         Opcode.OP_INT_SUB: '-',
         Opcode.OP_INT_MUL: '*',
         Opcode.OP_INT_DIV: '/',
+        Opcode.OP_INT_MINUS: '-',
         Opcode.OP_DBL_EQ: '==',
         Opcode.OP_DBL_NEQ: '!=',
         Opcode.OP_DBL_LT: '<',
@@ -61,11 +81,179 @@ def stringify(op):
     }
     return TABLE[op]
 
+def _decompile_RE_fast(code):
+    pattern = []
+    i = 0
+    while i < len(code):
+        _, opcode, args = code[i]
+        if opcode == RegexpOpcode.RE_OPCODE_ANY:
+            pattern.append('??')
+        elif opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+            pattern.append('%02x' % args[0])
+        elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
+            if args[1] == 0xf0:
+                pattern.append('%x?' % (args[0] >> 4))
+            else:
+                pattern.append('?%x' % (args[0], ))
+        elif opcode == RegexpOpcode.RE_OPCODE_PUSH:
+            """
+            Code for e{n,m} looks like:
+            
+                       code for e       (repeated n times)
+                       push m-n-1
+                   L0: split L1, L2
+                   L1: code for e
+                       jnz L0
+                   L2: pop
+                       split L3, L4
+                   L3: code for e
+                   L4:
+            This is how the code looks like after the PUSH:
+            
+                       push m-n-1        (3 bytes long)
+                   L0: split L1, L2      (3 bytes long)
+                   L1: any               (1 byte long)
+                       jnz L0            (3 bytes long)
+                   L2: pop               (1 byte long)
+                       ...
+            """
+            m_n_1 = args[0]
+            # count # of ANY before the loop
+            n = 0
+            while True:
+                c = code[i-n-1][1]
+                if c != RegexpOpcode.RE_OPCODE_ANY:
+                    break
+                n += 1
+                pattern.pop()
+            m = m_n_1 + n + 1
+            pattern.append("[%d-%d]" % (n, m))
+            i += 6
+            
+        elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
+            break
+        else:
+            raise DecompileError('Impossible opcode met in _decompile_RE_fast:', opcode)
+        i += 1
+
+    return pattern
+
+def _decompile_RE_range(code, start, end):
+    pattern = []
+    i = start
+    while i < end:
+        _, opcode, args = code[i]
+        if opcode == RegexpOpcode.RE_OPCODE_ANY:
+            pattern.append('.')
+        elif opcode == RegexpOpcode.RE_OPCODE_ANY_EXCEPT_NEW_LINE:
+            pattern.append('.')
+        elif opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+            pattern.append(bytes([args[0]]).decode('latin1'))
+        elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
+            if args[1] == 0xf0:
+                pattern.append('%x?' % (args[0] >> 4))
+            else:
+                pattern.append('?%x' % (args[0], ))
+        elif opcode in SPLIT_OPCODES:
+            pass
+        elif opcode == RegexpOpcode.RE_OPCODE_JUMP:
+            # backtrace to RE_OPCODE_SPLIT_A or RE_OPCODE_SPLIT_B to identify the repeat part
+            j = i - 1
+            while not code[j][1] in SPLIT_OPCODES:
+                j -= 1
+                pattern.pop()
+            # get the repeat part
+            subpattern = _decompile_RE_range(code, j, i)
+            if len(subpattern) > 1:
+                pattern.append('(%s)*' % ''.join(subpattern))
+            elif len(subpattern) == 0:
+                pattern.append('[Unsupported]')
+            else:
+                pattern.append('%s*' % subpattern[0])
+        elif opcode == RegexpOpcode.RE_OPCODE_PUSH:
+            """
+            Code for e{n,m} looks like:
+            
+                       code for e       (repeated n times)
+                       push m-n-1
+                   L0: split L1, L2
+                   L1: code for e
+                       jnz L0
+                   L2: pop
+                       split L3, L4
+                   L3: code for e
+                   L4:
+            """
+            m_n_1 = args[0]
+            # find jnz and identify the repeat part
+            j = i + 1
+            while code[j][1] != RegexpOpcode.RE_OPCODE_JNZ:
+                j += 1
+            sub_len = j - (i + 2)
+            subpattern = _decompile_RE_range(code, i + 2, j)
+
+            # count # of repeat part before the loop
+            n = 0
+            while True:
+                if code[i - n - 1][1] != code[j - n - 1][1]:
+                    break
+                n += 1
+            n = n // sub_len
+            for _ in range(n):
+                pattern.pop()
+            m = m_n_1 + n + 1
+            pattern.append(f"{''.join(subpattern)}{{%d,%d}}" % (n, m))
+            # skip the tail part
+            i = j + 2 + sub_len
+            
+        elif opcode in [RegexpOpcode.RE_OPCODE_CLASS, RegexpOpcode.RE_OPCODE_CLASS_NO_CASE]:
+            pass
+        elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
+            break
+        else:
+            raise DecompileError('Impossible opcode met in _decompile_RE_fast:', opcode)
+        i += 1
+    return pattern
+
+def decompile_RE(fw_code, bw_code, flags):
+    if flags & StrFlag.FAST_HEX_REGEXP:
+        fw = _decompile_RE_fast(fw_code)
+        bw = _decompile_RE_fast(bw_code)
+        if any(bw):
+            re = f'{{ {" ".join(reversed(bw))} {" ".join(fw)} }}'
+        else:
+            re = f'{{ {" ".join(fw)} }}'
+    else:
+        fw = _decompile_RE_range(fw_code, 0, len(fw_code))
+        bw = _decompile_RE_range(bw_code, 0, len(bw_code))
+        re = f'/{"".join(reversed(bw))}{"".join(fw)}/'
+    return re
+
+def AC_to_RE(root, start=1):
+    match_list = []
+    def _extract_matches(state):
+        if len(state['matches']) > 0:
+            match = state['matches'][0]
+            match_list.append(match)
+
+        for sym, to in state['transitions'].items():
+            _extract_matches(to)
+
+    _extract_matches(root)
+
+    REs = []
+    for match in match_list:
+        ptr = match['string']['ptr']
+        re = decompile_RE(match['forward_code_asm'], match['backward_code_asm'], match['string']['flags'])
+        REs.append((ptr, re))
+
+    return REs
+
+
 def optimize_walk(node):
     if node.type == 'val':
         return
 
-    # TODO: should we do constant folding or constant propagation?
     if node.data == Opcode.OP_PUSH:   # eliminate push nodes
         node.type = 'val'
         node.data = node.childs[0].data
@@ -73,6 +261,9 @@ def optimize_walk(node):
 
     for child in node.childs:
         optimize_walk(child)
+    if node.type == 'val':
+        return
+
 
 class Node:
     def __init__(self, data, type, rule):
@@ -86,28 +277,34 @@ class Node:
     def append(self, n):
         self.childs.append(n)
 
-    def __repr__(self):
-        return str(self)
-
     def __str__(self):
         if self.type == 'val':
             return f'{{"data": {json.dumps(self.data, default=str)}}}'
         else:
             return f'{{"data": "{str(self.data)}", "childs": {self.childs}}}'
 
+    def __repr__(self):
+        return str(self)
+
     def pretty(self):
         out = ''
         if self.type == 'val':
-            arg_id = None
+            arg_id = ''
             try:
                 arg_id = self.data[1]['identifier']
             except:
                 pass
-            if arg_id != None and any(arg_id) and arg_id.isascii():
+            if arg_id:
                 out += str(arg_id)
+            elif isinstance(self.data[0], int):
+                v = self.data[0]
+                if v > 9:
+                    out += '0x%x' % v
+                else:
+                    out += '%d' % v
             else:
                 out += str(self.data[0])
-        else:
+        elif self.type == 'op':
             if self.data == Opcode.OP_MATCH_RULE:
                 for child in self.childs:
                     out += child.pretty()
@@ -153,9 +350,9 @@ class Node:
 
                 operands = self.childs[0:-2]
                 if len(operands) == len(self.rule.data['strings']):
-                    rhs = 'them'
+                    rhs = 'them' # TODO: more check
                 else:
-                    rhs = ','.join([child.data[1]['identifier'] for child in reversed(operands)])
+                    rhs = ', '.join([child.data[1]['identifier'] for child in reversed(operands)])
 
                 out += f'{lhs} of {rhs}'
 
@@ -174,7 +371,10 @@ class Node:
                 # Usually push should be optimized out
                 out += f'PUSH({self.childs[0].pretty()})'
             else:
-                raise ValueError(OPCODE_UNIMPLEMENTED, self)
+                raise DecompileError(self)
+        else: # not op, not val?
+            assert 0
+
         return out
 
 
@@ -183,14 +383,12 @@ class YaraRule:
         self.data = data
         self.data.setdefault('strings', OrderedDict())
 
-    def __get_strings(self):
         strings_ptr_set = self.data.setdefault('strings_ptr_set', set())
-        for s in self.data.get('_strings'):
+        for s in self.data.get('strings_list'):
             self.data['strings'][s['identifier']] = s
             strings_ptr_set.add(s['ptr'])
 
     def __str__(self):
-        self.__get_strings()
         out = ''
         if self.data['flags'] & RuleFlag.PRIVATE:
             out += 'private '
@@ -213,15 +411,17 @@ class YaraRule:
         if self.data.get('strings'):
             out += '\tstrings:\n'
             for string in self.data['strings'].values():
-                out += '\t/*{ptr:x}*/\t{identifier}'.format(**string)
+                out += '\t/*0x{ptr:x}*/\t{identifier}'.format(**string)
 
                 if string['flags'] & StrFlag.HEXADECIMAL and string['flags'] & StrFlag.LITERAL:
                     out += ' = {str}'.format(**string)
                 elif string['flags'] & StrFlag.LITERAL:
-                    out += ' = "{str}"'.format(**string)
+                    out += ' = ' + escape_str(string['str'])
                 else:
-                    out += ' [__unrecoverable_with_yaradec__] /* flags = %s */' % string['flags']
-#                    raise ValueError(AC_UNRECOVERABLE)
+                    if 're' in string:
+                        out += ' = ' + string['re']
+                    else:
+                        out += ' = /UNRECOVERABLE_REGEXP/ /* regex is unrecoverable right now. flags = %s */' % string['flags']
 
                 if string['flags'] & StrFlag.FULL_WORD:
                     out += ' fullword'
@@ -236,11 +436,20 @@ class YaraRule:
                     out += ' regex'
                 out += '\n'
 
-#        out += self.asm()
-        out += self.condition()
-        out += '\n}\n'
+        if OPTIONS_OUTPUT_ASM:
+            out += self.asm()
+        if self.AST:
+            try:
+                out += self.decompile()
+            except DecompileError as e:
+                out += '/*\nDecompileError: %r\n*/' % e
+            if OPTIONS_OUTPUT_TREE:
+                out += '\n/*\n%s\n*/\n' % repr(self.AST)
+        out += '}\n'
+        out += '\n'
 
         return out
+
 
     def build_AST(self):
         code = self.data['code']
@@ -284,7 +493,7 @@ class YaraRule:
 
                 node.append(stack.pop())
                 stack.append(node)
-            elif opcode in IGNORED_OPCODES:
+            elif opcode in {*IGNORED_OPCODES, Opcode.OP_OBJ_LOAD, Opcode.OP_OBJ_FIELD, Opcode.OP_CALL, Opcode.OP_OBJ_VALUE}:
                 continue
 
             elif opcode == Opcode.OP_MATCH_RULE:
@@ -295,10 +504,9 @@ class YaraRule:
 
             else:
                 print(self.asm())
-                raise ValueError(OPCODE_UNIMPLEMENTED, opcode)
+                raise DecompileError(opcode)
 
         self.AST = stack.pop()
-        #print(self.AST)
 
     def json(self):
         return str(self.AST)
@@ -321,26 +529,28 @@ class YaraRule:
             out += '\n'
         return out
 
-    def condition(self):
-        out = '\tcondition:\n\t\t'
+    def decompile(self):
+        out = '\tcondition:\n'
         node = self.AST
-        out += node.pretty()
+        out += '\t\t' + node.pretty() + '\n'
         return out
 
     def optimize(self):
-        optimize_walk(self.AST)
+        if self.AST:
+            optimize_walk(self.AST)
 
 
-class v11:
+class decompiler:
     def __init__(self, stream, size):
         self.size = size
         self.data = io.BytesIO(stream.read(size))
         self.code = OrderedDict()
+        self.addr_string_map = {}
 
         if not self.relocate(stream):
             raise RuntimeError('Invalid file')
 
-        self.version, self.rules, self.externals, self.code_start, self.automation = unpack(self.data, '<LQQQQ')
+        self.version, self.rules, self.externals, self.code_start, self.automaton = unpack(self.data, '<LQQQQ')
 
     def relocate(self, stream):
         try:
@@ -354,50 +564,64 @@ class v11:
                 if (reloc_target == 0xFFFABADA):
                     self.data.getbuffer()[reloc:reloc + 4] = b'\0\0\0\0'
 
-                #print('reloc: 0x%.8x: 0x%.8x' % (reloc, reloc_target))
-
                 reloc = unpack(stream, '<L')[0]
         except struct.error:
             print("Invalid file (bad relocs)")
             return False
         return True
 
-    def _disasm(self, ip):
-        self.data.seek(ip)
-        opcode = Opcode(self.data.read(1)[0])
+    def regexp_disasm(self, ip):
+        buf = self.data.getbuffer()
+        if OPTIONS_DUMP_RE_ASM:
+            print('--- BEGIN REGEXP DISASM AT 0x%.8x ---' % ip)
 
-        if opcode in (
-            Opcode.OP_CLEAR_M,
-            Opcode.OP_ADD_M,
-            Opcode.OP_INCR_M,
-            Opcode.OP_PUSH_M,
-            Opcode.OP_POP_M,
-            Opcode.OP_SWAPUNDEF,
-            Opcode.OP_INIT_RULE,
-            Opcode.OP_PUSH_RULE,
-            Opcode.OP_MATCH_RULE,
-            Opcode.OP_OBJ_LOAD,
-            Opcode.OP_OBJ_FIELD,
-            Opcode.OP_CALL,
-            Opcode.OP_IMPORT,
-            Opcode.OP_INT_TO_DBL,
-
-            Opcode.OP_JNUNDEF,
-            Opcode.OP_JLE,
-            Opcode.OP_JTRUE,
-            Opcode.OP_JFALSE,
-
-            Opcode.OP_PUSH,
-            ):
-            return ip + 9, opcode, (unpack(self.data, '<Q')[0], )
-        else:
-            return ip + 1, opcode, ()
-
-    def disasm(self):
-        ip = self.code_start
         while True:
-            ip, opcode, args = self._disasm(ip)
-            yield (ip, opcode, args)
+            opcode = RegexpOpcode(unpack2(buf, ip, '<B')[0])
+            ip_inc = 1
+            args = []
+
+            if opcode == RegexpOpcode.RE_OPCODE_LITERAL:
+                ip_inc = 2
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+            elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+                args.append(unpack2(buf, ip + 2, '<B')[0])
+            elif opcode in [RegexpOpcode.RE_OPCODE_SPLIT_B, RegexpOpcode.RE_OPCODE_SPLIT_A]:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<B')[0])
+                args.append(unpack2(buf, ip + 2, '<B')[0])
+            elif opcode == RegexpOpcode.RE_OPCODE_PUSH:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<H')[0])
+            elif opcode in [RegexpOpcode.RE_OPCODE_JNZ, RegexpOpcode.RE_OPCODE_JUMP]:
+                ip_inc = 3
+                args.append(unpack2(buf, ip + 1, '<h')[0])
+            elif opcode in [
+                    RegexpOpcode.RE_OPCODE_CLASS,
+                    RegexpOpcode.RE_OPCODE_CLASS_NO_CASE,
+                    ]:
+                ip_inc = 33
+                pass
+            elif opcode in [
+                    RegexpOpcode.RE_OPCODE_ANY,
+                    RegexpOpcode.RE_OPCODE_POP,
+                    RegexpOpcode.RE_OPCODE_ANY_EXCEPT_NEW_LINE,
+                ]:
+                pass
+            elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
+                pass
+            else:
+                raise DecompileError('Unknown opcode' + repr(opcode))
+
+            args_str = ' '.join('0x%x' % i for i in args)
+            if OPTIONS_DUMP_RE_ASM:
+                print('0x%.8x (%-9d): %-24s %s' % (ip, ip, opcode, args_str))
+            yield ip, opcode, args
+            ip += ip_inc
+
+            if opcode == RegexpOpcode.RE_OPCODE_MATCH:
+                break
 
     def get_code(self, buf, ip):
         if self.code.get(ip):
@@ -441,10 +665,7 @@ class v11:
                 args.append('UNDEFINED')
             else:
                 args.append(arg)
-                try:
-                    args.append(self.get_string(arg))
-                except struct.error as exc:
-                    pass
+                # TODO: args.append(string)
             next = [ip + 8 + 1]
         elif opcode in [
             Opcode.OP_ERROR,
@@ -511,14 +732,12 @@ class v11:
         return '{}:'.format(ns) if ns else ''
 
     def get_strings(self, addr):
-        strings = []
         while True:
             string = self.get_string(addr)
             if not string:
                 break
-            strings.append(string)
+            yield string
             addr += 4 * 4 + 8 * 4 + (20*_MAX_THREADS*2)
-        return strings
 
     def get_string(self, addr):
         '''
@@ -568,7 +787,7 @@ class v11:
         )
 
         if flags & StrFlag.HEXADECIMAL and flags & StrFlag.LITERAL:
-            data['str'] = '{' + ' '.join(['{:X}'.format(x) for x in str_str]) + '}'
+            data['str'] = '{ ' + ' '.join(['{:02X}'.format(x) for x in str_str]) + ' }'
         elif flags & StrFlag.LITERAL:
             data['str'] = str_str.decode('latin1')
         else:
@@ -618,59 +837,165 @@ class v11:
 
         if ns:
             data['ns'] = self.get_ns(ns)
+        else:
+            data['ns'] = ''
 
         if strings:
-            data['_strings'] = self.get_strings(strings)
+            data['strings_list'] = list(self.get_strings(strings))
+            data['strings_map'] = { s['ptr']: s for s in data['strings_list'] }
         else:
-            data['_strings'] = []
+            data['strings_list'] = []
+            data['strings_map'] = {}
 
         return data
 
-    def parse(self):
+    def parse_bytecode(self):
         buf = self.data.getbuffer()
         ip = self.code_start
 
         todo = [ip]
-
         while todo:
             ip = todo.pop()
             todo += self.get_code(buf, ip)
 
-    def get_rules_easy(self):
-        rules = []
+    def get_rules(self):
         i = 0
         while True:
             c = self.get_rule(self.rules + i * 0xac)
             if not c: break
             i += 1
-            c['ns'] = ''
             c['code'] = []
-            rules.append(YaraRule(c))
-
-        return rules
+            yield YaraRule(c)
 
     def parse_rules(self) -> List[YaraRule]:
-        global rules_table
-        rules_table = {}
-        self.parse()
+        rules = list(self.get_rules())
+        addr_rules_map = { r.data['ptr']: r for r in rules }
 
+        self.parse_bytecode()
         cur_rule = None
         for val in self.code.values():
             if val['opcode'] == Opcode.OP_INIT_RULE:
-                cur_rule = self.get_rule(val['args'][0])
-                cur_rule['code'] = []
+                cur_rule = addr_rules_map[val['args'][0]]
 
-                rules_table[cur_rule['ptr']] = YaraRule(cur_rule)
-            elif val['opcode'] == Opcode.OP_HALT:
-                break
             elif val['opcode'] == Opcode.OP_IMPORT:
                 continue
-#                raise ValueError(IMPORT_UNINPLEMENTED)
 
-            cur_rule['code'].append(val)
+            elif val['opcode'] == Opcode.OP_PUSH:
+                arg0 = val['args'][0]
+                if arg0 in cur_rule.data['strings_ptr_set']:
+                    val['args'].append(cur_rule.data['strings_map'][arg0])
 
-        for rule in rules_table.values():
+            elif val['opcode'] == Opcode.OP_PUSH_RULE:
+                arg = addr_rules_map.get(val['args'][0])
+                if arg:
+                    val['args'].append(arg.data)
+
+            elif val['opcode'] == Opcode.OP_HALT:
+                break
+            cur_rule.data['code'].append(val)
+
+        for rule in rules:
             rule.build_AST()
             rule.optimize()
+            self.addr_string_map.update(rule.data['strings_map'])
 
-        return list(rules_table.values())
+        self.parse_automaton()
+        
+        REs = AC_to_RE(self.automaton_root)
+        for ptr, re in REs:
+            for rule in rules:
+                for string in rule.data['strings_list']:
+                    if string['ptr'] == ptr:
+                        string['re'] = re
+        
+
+        return rules
+
+    def parse_automaton(self):
+        buf = self.data.getbuffer()
+        self.automaton_addr_map = addr_map = {}
+        root_addr = unpack2(buf, self.automaton, 'Q')[0]
+        queue = [root_addr]
+        self.automaton_root = root = addr_map.setdefault(root_addr, {})
+
+        while queue:
+            addr = queue.pop(0)
+            node = addr_map.setdefault(addr, {})
+            if node: # visited?
+                continue
+            if not addr:
+                continue
+
+            depth, failure, match_ptr, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
+
+            matches = []
+            while match_ptr:
+                '''
+                typedef struct _YR_AC_MATCH
+                {
+                  uint16_t backtrack;
+
+                  DECLARE_REFERENCE(YR_STRING*, string);
+                  DECLARE_REFERENCE(uint8_t*, forward_code);
+                  DECLARE_REFERENCE(uint8_t*, backward_code);
+                  DECLARE_REFERENCE(struct _YR_AC_MATCH*, next);
+
+                } YR_AC_MATCH;
+                '''
+                backtrack, string, forward_code, backward_code, next_match_ptr = unpack2(buf, match_ptr, '<HQQQQ')
+                string_obj = self.addr_string_map[string]
+                if not string_obj['str']:
+                    string_obj.setdefault('ac_ref_count', 0)
+                    string_obj['ac_ref_count'] += 1
+                    match_obj = dict(
+                        ptr=match_ptr,
+                        backtrack=backtrack,
+                        string=string_obj,
+                        forward_code=forward_code,
+                        backward_code=backward_code,
+                        forward_code_asm=list(self.regexp_disasm(forward_code)),
+                        backward_code_asm=list(self.regexp_disasm(backward_code)),
+                    )
+                    matches.append(match_obj)
+                match_ptr = next_match_ptr
+
+            node['addr'] = addr
+            node['depth'] = depth
+            node['failure'] = failure
+            node['matches'] = matches
+            node['transitions'] = T = {}
+
+            if depth <= MAX_TABLE_BASED_STATES_DEPTH: # array-based
+                for i, addr in enumerate(transitions):
+                    if addr:
+                        T[bytes([i])] = addr_map.setdefault(addr, {})
+                        queue.append(addr)
+
+            else: # list-based
+                '''
+                typedef struct _YR_AC_STATE_TRANSITION
+                {
+                  uint8_t input;
+
+                  DECLARE_REFERENCE(YR_AC_STATE*, state);
+                  DECLARE_REFERENCE(struct _YR_AC_STATE_TRANSITION*, next);
+
+                } YR_AC_STATE_TRANSITION;
+                '''
+                t = transitions[0]
+                while t:
+                    input_byte, state, next_t = unpack2(buf, t, '<BQQ')
+                    if state:
+                        T[bytes([input_byte])] = addr_map.setdefault(state, {})
+                        queue.append(state)
+                    t = next_t
+
+        def eliminate_empty_tail(node):
+            for key, child in list(node['transitions'].items()):
+                eliminate_empty_tail(child)
+                if not child['matches'] and not child['transitions']:
+                    node['transitions'].pop(key, None)
+
+        eliminate_empty_tail(root)
+
+

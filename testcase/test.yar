@@ -13,6 +13,7 @@ strings:
 	$b3  = { 00 04 05 06 }
 	$b4  = { 00 05 06 }
 	$b5  = { 00 06 }
+	$b6  = { 11 22 3? 44 [1-5] 65 77 ?9 11 ?? 33 ?? 44 55 66 }
 
 condition:
 	(all of them) or (3 of them) and uint16(0) == 0x5a4d

@@ -1,33 +1,8 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
-import sys
-
 from utils import unpack
-import decompiler
-
-decoders = {
-    8: decompiler.v11,
-    11: decompiler.v11,
-    12: decompiler.v11,  # TODO: look for changes in v12
-}
-
-
-def load_file(fn=None, fp=None):
-    if fn:
-        fp = open(fn, 'rb')
-
-    header, size, version = unpack(fp, '<4sLB')
-    if header != b'YARA':
-        print('Invalid File (Bad header)')
-        exit()
-
-    try:
-        return decoders[version](fp, size)
-    except KeyError:
-        print('Unsupported Yara version')
-        exit()
-
+import sys
 
 def main():
     try:
@@ -37,23 +12,39 @@ def main():
         sys.exit(1)
 
     with path.open('rb') as f:
-        header, size, version = unpack(f, '<4sLB')
+        header, size = unpack(f, '<4sL')
         if header != b'YARA':
             print('Invalid File (Bad header)')
             exit()
 
-        try:
-            dec =  decoders[version](f, size)
-        except KeyError:
+        # lookahead for newer versions
+        # v8 -> version: 1byte, 3.9.0 -> version: 4bytes
+        version = unpack(f, '<L')[0]
+        if version != 0x150020:
+            f.seek(-4, 1)
+            version = unpack(f, '<B')[0]
+        if version in [8, 11, 12]:
+            import v11dec as decompiler
+        elif version == 0x150020:
+            import v39dec as decompiler
+        else:
             print('Unsupported Yara version')
             exit()
+        dec =  decompiler.decompiler(f, size)
 
     rules = dec.parse_rules()
+    cnt = 0
+    unrecoverable = 0
     for rule in rules:
-        print(rule)
+        o = str(rule)
+        cnt += 1
+        if 'UNRECOVERABLE_REGEXP' in o:
+            unrecoverable += 1
+        print(o)
+    
+    print('/* Decompile %d/%d rules */' % (cnt - unrecoverable, cnt))
+    print('// vim: ft=yara')
 
-    #for addr, opcode, args in dec.disasm():
-    #    print('%.8x: %-10s %r' % (addr, opcode, args))
 
 if __name__ == '__main__':
     main()

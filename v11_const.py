@@ -5,6 +5,7 @@ from enum import IntEnum, IntFlag
 
 UNDEFINED = 0xFFFABADAFABADAFF
 _MAX_THREADS = 32
+MAX_TABLE_BASED_STATES_DEPTH = 1
 
 
 def IS_UNDEFINED(X):
@@ -123,6 +124,7 @@ class Opcode(IntEnum):
     OP_UINT8BE = (OP_READ_INT + 9)
     OP_UINT16BE = (OP_READ_INT + 10)
     OP_UINT32BE = (OP_READ_INT + 11)
+
 
 IGNORED_OPCODES = {
     Opcode.OP_INIT_RULE,
@@ -246,3 +248,37 @@ class RuleFlag(IntFlag):
     REQUIRE_EXECUTABLE = 0x04
     REQUIRE_FILE = 0x08
     NULL = 0x1000
+
+
+class RegexpOpcode(IntEnum):
+    RE_OPCODE_ANY                 = 0xA0
+    RE_OPCODE_ANY_EXCEPT_NEW_LINE = 0xA1
+    RE_OPCODE_LITERAL             = 0xA2
+    RE_OPCODE_LITERAL_NO_CASE     = 0xA3
+    RE_OPCODE_MASKED_LITERAL      = 0xA4
+    RE_OPCODE_CLASS               = 0xA5
+    RE_OPCODE_CLASS_NO_CASE       = 0xA6
+    RE_OPCODE_WORD_CHAR           = 0xA7
+    RE_OPCODE_NON_WORD_CHAR       = 0xA8
+    RE_OPCODE_SPACE               = 0xA9
+    RE_OPCODE_NON_SPACE           = 0xAA
+    RE_OPCODE_DIGIT               = 0xAB
+    RE_OPCODE_NON_DIGIT           = 0xAC
+    RE_OPCODE_MATCH               = 0xAD
+
+    RE_OPCODE_MATCH_AT_END        = 0xB0
+    RE_OPCODE_MATCH_AT_START      = 0xB1
+    RE_OPCODE_WORD_BOUNDARY       = 0xB2
+    RE_OPCODE_NON_WORD_BOUNDARY   = 0xB3
+
+    RE_OPCODE_SPLIT_A             = 0xC0
+    RE_OPCODE_SPLIT_B             = 0xC1
+    RE_OPCODE_PUSH                = 0xC2
+    RE_OPCODE_POP                 = 0xC3
+    RE_OPCODE_JNZ                 = 0xC4
+    RE_OPCODE_JUMP                = 0xC5
+
+SPLIT_OPCODES = {
+    RegexpOpcode.RE_OPCODE_SPLIT_A,
+    RegexpOpcode.RE_OPCODE_SPLIT_B
+}

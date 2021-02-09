@@ -1,0 +1,299 @@
+//------------------------------------------------
+//--- 010 Editor v11.0.1 Binary Template
+//
+//      File: YACv8.bt
+//   Authors: Inndy Lin
+//   Version: 1.0
+//   Purpose: Parse compiled yara rule
+//  Category: Executable
+// File Mask: *.yac
+//  ID Bytes: 59 41 52 41
+//   History: 
+//------------------------------------------------
+
+const int MAX_THREADS = 32;
+const uint BADADDR = 0xfffabada;
+
+#define RULE_GFLAGS_PRIVATE              0x01
+#define RULE_GFLAGS_GLOBAL               0x02
+#define RULE_GFLAGS_REQUIRE_EXECUTABLE   0x04
+#define RULE_GFLAGS_REQUIRE_FILE         0x08
+#define RULE_GFLAGS_NULL 0x1000
+
+struct
+{
+    char   Signature[4]             <comment="'YARA'">;
+    uint32 Size                     <comment="Size of code body">;
+    uint32 Version                  <comment="Yara binary rule version">;
+} YARA_BINARY_RULE_V39;
+
+int yr_seek(uint64 offset)
+{
+    if(offset == BADADDR) return false;
+    // Assert(offset <= YARA_BINARY_RULE_V39.Size, "Offset out of range");
+    FSeek(sizeof(YARA_BINARY_RULE_V39) + offset);
+    return true;
+}
+
+string PtrComment(uint64 &v)
+{
+    if(v == BADADDR || v == 0xfafafafafafafafa) {
+        return "<BADADDR>";
+    }
+    string s;
+    SPrintf(s, "%x", v + sizeof(YARA_BINARY_RULE_V39)); 
+    return s;
+}
+
+string yr_read_string(uint64 offset)
+{
+    if(offset == BADADDR) return "";
+    return ReadString(sizeof(YARA_BINARY_RULE_V39) + offset);
+}
+
+struct {
+    uint64 YR_RULE <format=hex, comment=PtrComment>;
+    uint64 YR_EXTERNAL_VARIABLE <format=hex, comment=PtrComment>;
+    uint64 code_start <format=hex, comment=PtrComment>;
+    uint64 YR_AC_MATCH_TABLE <format=hex, comment=PtrComment>;
+    uint64 YR_AC_TRANSITION_TABLE <format=hex, comment=PtrComment>;
+    uint32 ac_tables_size;
+} YARA_RULES_FILE_HEADER;
+
+yr_seek(YARA_RULES_FILE_HEADER.YR_RULE);
+
+typedef enum int {
+    META_TYPE_NULL = 0,
+    META_TYPE_INTEGER = 1,
+    META_TYPE_STRING = 2,
+    META_TYPE_BOOLEAN = 3,
+} YR_META_TYPE;
+
+string YR_META_Comment(struct YR_META &This) {
+    if(This.Type == META_TYPE_NULL) return "<END>";
+
+    string ret = This.Idenfitier + " / ";
+    switch(This.Type) {
+        case META_TYPE_INTEGER:
+            ret += "<int>";
+            break;
+        case META_TYPE_STRING:
+            ret += "<string>";
+            break;
+        case META_TYPE_BOOLEAN:
+            ret += "<bool>";
+            break;
+    }
+    return ret;
+}
+
+typedef struct {
+    YR_META_TYPE Type;
+    int32 __padding__;
+    int64 Integer;
+    int64 IndentifierPtr <format=hex, comment=PtrComment>;
+    int64 StringPtr <format=hex, comment=PtrComment>;
+    local int64 pos = FTell();
+
+    yr_seek(IndentifierPtr);
+    char Identifier[];
+
+    if(Type == META_TYPE_STRING && yr_seek(StringPtr)) {
+        char String[];
+    }
+    switch(Type) {
+        case META_TYPE_INTEGER:
+            // Printf("%s<int> = %d\n", Identifier, Integer);
+            break;
+        case META_TYPE_STRING:
+            // Printf("%s<str> = %s\n", Identifier, String);
+            break;
+        case META_TYPE_BOOLEAN:
+            // Printf("%s<bool> = %s\n", Identifier, Integer ? "true" : "false");
+            break;
+    }
+
+    FSeek(pos);
+} YR_META <comment=YR_META_Comment>;
+
+typedef struct {
+    int32 Flags;
+    int32 Length;
+    uint64 IdentifierPtr <format=hex, comment=PtrComment>;
+    uint64 StringPtr <format=hex, comment=PtrComment>;
+    uint64 ChainedToPtr <format=hex, comment=PtrComment>;
+    uint64 YR_RULE <format=hex, comment=PtrComment>;
+    int32 ChainGapMin;
+    int32 ChainGapMax;
+    int64 FixedOffset <format=hex>;
+
+    FSkip(24*MAX_THREADS);
+    // YR_MATCHES matches[MAX_THREADS];
+    FSkip(24*MAX_THREADS);
+    // YR_MATCHES unconfirmed_matches[MAX_THREADS];
+    local int64 pos = FTell();
+
+    if(Flags == 0x1000) // STRING_GFLAGS_NULL
+    {
+        FSeek(pos);
+        return false;
+    }
+
+    yr_seek(IdentifierPtr);
+    char Identifier[];
+    yr_seek(StringPtr);
+    char String[Length];
+
+    if(Length > 0) {
+        // Printf("%s = %s\n", Identifier, String);
+    }
+
+    FSeek(pos);
+} YR_STRING;
+
+string YR_RULE_Comment(struct YR_RULE &This) {
+    if(This.GlobalFlags & RULE_GFLAGS_NULL) return "<END>";
+
+    string ret = "";
+    if(This.NamespacePtr != BADADDR) {
+        // ret += yr_read_string(This.NamespacePtr) + "\\";
+    }
+    ret += yr_read_string(This.IdentifierPtr);
+    if(This.TagsPtr != BADADDR) {
+        ret += " : " + yr_read_string(This.TagsPtr);
+    }
+    if(This.MetasPtr != BADADDR) {
+        ret += " <META>";
+    }
+    return ret;
+}
+
+typedef struct {
+    int64  GlobalFlags;
+    int32  ThreadFlags[MAX_THREADS];
+    uint64 IdentifierPtr <format=hex, comment=PtrComment>;
+    uint64 TagsPtr <format=hex, comment=PtrComment>;
+    uint64 MetasPtr <format=hex, comment=PtrComment>; // YR_META
+    uint64 StringsPtr <format=hex, comment=PtrComment>; // YR_STRINGS
+    uint64 NamespacePtr <format=hex, comment=PtrComment>; // YR_NAMESPACE
+    int64 num_atoms;
+    int64 time_cost;
+    int64 time_cost_per_thread[MAX_THREADS];
+    local int64 pos = FTell();
+
+    if(GlobalFlags & RULE_GFLAGS_NULL) {
+        return false;
+    }
+    
+    yr_seek(IdentifierPtr);
+    char Identifier[];
+
+    // Printf("rule %s", Identifier);
+
+    if(yr_seek(TagsPtr)) {
+        char Tags[];
+        // Printf(" : %s", Tags);
+    }
+    // Printf(" {\n");
+
+    if(yr_seek(MetasPtr)) {
+        // Printf("meta:\n");
+        do {
+            YR_META Meta;
+        } while(Meta.Type != META_TYPE_NULL);
+    }
+
+    if(yr_seek(StringsPtr)) {
+        // Printf("strings:\n");
+        do {
+            YR_STRING String;
+        } while(!(String.Flags & 0x1000)); // STRING_GFLAGS_NULL
+    }
+
+    // Printf("}\n");
+
+    FSeek(pos);
+} YR_RULE <comment=YR_RULE_Comment>;
+
+do YR_RULE Rules; while((Rules.GlobalFlags & RULE_GFLAGS_NULL) == 0);
+/*
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+YR_RULE Rules;YR_RULE Rules;YR_RULE Rules;
+
+yr_seek(8142883);
+YR_STRING String;
+YR_STRING String;
+*/
+
+yr_seek(YARA_RULES_FILE_HEADER.YR_EXTERNAL_VARIABLE);
+struct {
+    uint32 Type;
+    union {
+        int64  IntVal;
+        double DoubleVal;
+    } Val;
+
+    int64 Identifier;
+} YR_EXTERNAL_VARIABLE;
+
+
+
+
+typedef struct _YR_AC_STATE {
+    byte Depth;
+    uint64 FailurePtr <format=hex, comment=PtrComment>;
+    uint64 MatchesPtr <format=hex, comment=PtrComment>;
+    local uint64 pos;
+    local int i;
+
+    if(Depth <= 1) { // MAX_TABLE_BASED_STATES_DEPTH
+        for(i = 0; i < 256; i++) {
+            uint64 TransitionsPtr <format=hex, comment=PtrComment>;
+            pos = FTell();
+            if(TransitionsPtr) {
+                yr_seek(TransitionsPtr);
+                struct _YR_AC_STATE state;
+            }
+            FSeek(pos);
+        }
+    } else {
+        uint64 TransitionsPtr <format=hex, comment=PtrComment>;
+        pos = FTell();
+        if(TransitionsPtr) {
+            yr_seek(TransitionsPtr);
+            struct _YR_AC_STATE state;
+        }
+        FSeek(pos);
+    }
+} YR_AC_STATE;
+
+struct YR_AC_MATCH {
+  uint16 backtrack;
+
+  YR_STRING str;
+  uint64 forward_code;
+  uint64 backward_code;
+  YR_AC_MATCH* next;
+};
+
+
+yr_seek(YARA_RULES_FILE_HEADER.YR_AC_MATCH_TABLE);
+struct {
+    uint64 match <format=hex, comment=PtrComment>;
+} YR_AC_MATCH_TABLE;
+
+
+
+yr_seek(YARA_RULES_FILE_HEADER.YR_AC_TRANSITION_TABLE);
+struct {
+    uint32 transition;
+} YR_AC_TRANSITION_TABLE;
+
+yr_seek(YARA_BINARY_RULE_V39.Size);
+local LONG RelocationTableLength = (FileSize() - YARA_BINARY_RULE_V39.Size - sizeof(YARA_BINARY_RULE_V39)) / 4;
+LONG RelocationTable[(FileSize() - YARA_BINARY_RULE_V39.Size - sizeof(YARA_BINARY_RULE_V39)) / 4];
+Assert(RelocationTable[RelocationTableLength - 1] == -1, "Last item of RelocationTable must be -1, file corrupted");

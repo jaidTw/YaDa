@@ -1,4 +1,3 @@
-from typing import List
 from collections import OrderedDict
 from itertools import product
 from utils import unpack, unpack2
@@ -857,7 +856,7 @@ class decompiler:
             c['code'] = []
             yield YaraRule(c)
 
-    def parse_rules(self) -> List[YaraRule]:
+    def parse_rules(self):
         rules = list(self.get_rules())
         addr_rules_map = { r.data['ptr']: r for r in rules }
 

@@ -130,8 +130,28 @@ def _decompile_RE_fast(code):
             pattern.append("[%d-%d]" % (n, m))
             i += 6
             
+        elif opcode == RegexpOpcode.RE_OPCODE_SPLIT_B:
+            """
+            SPLIT_B occurs without PUSH only when range = [N, N+1]
+            The code would be like:
+                any       (repeated n times)
+                split_b
+                any
+            """
+            # count # of ANY before split_b
+            n = 0
+            while True:
+                c = code[i-n-1][1]
+                if c != RegexpOpcode.RE_OPCODE_ANY:
+                    break
+                n += 1
+                pattern.pop()
+            pattern.append("[%d-%d]" % (n, n+1))
+            # skip the next any
+            i += 1
         elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
             break
+
         else:
             raise DecompileError('Impossible opcode met in _decompile_RE_fast:', opcode)
         i += 1
@@ -965,16 +985,15 @@ class decompiler:
                         backward_code=backward_code,
                     )
                     matches.append(match_obj)
-                    if string_obj['flags'] & StrFlag.FAST_HEX_REGEXP:
-                        match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
-                        match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))
-                        try:
-                            string_obj['re'] = decompile_RE(match_obj['forward_code_asm'], match_obj['backward_code_asm'], match_obj['string']['flags'])
-                        except DecompileError as e:
-                            print('--- DecompileError while process following object ---')
-                            pprint(match_obj)
-                            print(e)
-                            pass
+                    match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
+                    match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))
+                    try:
+                        string_obj['re'] = decompile_RE(match_obj['forward_code_asm'], match_obj['backward_code_asm'], match_obj['string']['flags'])
+                    except DecompileError as e:
+                        print('--- DecompileError while process following object ---')
+                        pprint(match_obj)
+                        print(e)
+                        pass
                 match_ptr = next_match_ptr
 
             node['addr'] = addr

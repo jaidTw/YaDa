@@ -87,10 +87,10 @@ def stringify(op):
     except KeyError as e:
         raise DecompileError('Opcode %r mapping not found' % op) from e
 
-def _decompile_RE_fast(code):
+def _decompile_RE_hex(code, start, end, backward=0):
     pattern = []
-    i = 0
-    while i < len(code):
+    i = start
+    while i < end:
         _, opcode, args = code[i]
         if opcode == RegexpOpcode.RE_OPCODE_ANY:
             pattern.append('??')
@@ -155,11 +155,35 @@ def _decompile_RE_fast(code):
             pattern.append("[%d-%d]" % (n, n+1))
             # skip the next any
             i += 1
+        elif opcode == RegexpOpcode.RE_OPCODE_SPLIT_A:
+            """
+            SPLIT_A occurs if there is ( A | B ) structure
+            code:
+                  split_a L1, 0
+                  code for A      ----- n
+                  jmp L2
+            L1:   code for B      ----- m
+            L2:   ...
+            """
+            # Find jump and get the displacement to identify the address of L2
+            n, m = 0, 0
+            while code[i+n][1] != RegexpOpcode.RE_OPCODE_JUMP:
+                n += 1
+            disp = code[i+n][2][0]
+            while code[i+n][0] + disp != code[i+n+m][0]:
+                m += 1
+            A_pattern = _decompile_RE_hex(code, i+1, i+n)
+            B_pattern = _decompile_RE_hex(code, i+n+1, i+n+m)
+            if backward:
+                pattern.append(f'( {" ".join(reversed(A_pattern))} | {" ".join(reversed(B_pattern))} )')
+            else:
+                pattern.append(f'( {" ".join(A_pattern)} | {" ".join(B_pattern)} )')
+            i += n + m - 1
         elif opcode == RegexpOpcode.RE_OPCODE_MATCH:
             break
 
         else:
-            raise DecompileError('Impossible opcode met in _decompile_RE_fast:', opcode)
+            raise DecompileError('Impossible opcode met in _decompile_RE_hex:', opcode)
         i += 1
 
     return pattern
@@ -179,10 +203,9 @@ def _decompile_RE_range(code, start, end, backward=0):
             else:
                 pattern.append('\\x%.2x' % args[0])
         elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
-            if args[1] == 0xf0:
-                pattern.append('%x?' % (args[0] >> 4))
-            else:
-                pattern.append('?%x' % (args[0], ))
+            # This is a hex pattern, abort the work and call _decompile_RE_hex
+            # The second return value is True if this is a hex pattern (meeting MASKED_LITERAL)
+            return [], True
         elif opcode in SPLIT_OPCODES:
             pass
         elif opcode == RegexpOpcode.RE_OPCODE_JUMP:
@@ -195,7 +218,7 @@ def _decompile_RE_range(code, start, end, backward=0):
                 except IndexError as e:
                     raise DecompileError() from e
             # get the repeat part
-            subpattern = _decompile_RE_range(code, j, i, backward)
+            subpattern, _ = _decompile_RE_range(code, j, i, backward)
             if len(subpattern) > 1:
                 if backward:
                     pattern.append('(%s)*' % ''.join(reversed(subpattern)))
@@ -225,7 +248,7 @@ def _decompile_RE_range(code, start, end, backward=0):
             while code[j][1] != RegexpOpcode.RE_OPCODE_JNZ:
                 j += 1
             sub_len = j - (i + 2)
-            subpattern = _decompile_RE_range(code, i + 2, j, backward)
+            subpattern, _ = _decompile_RE_range(code, i + 2, j, backward)
 
             # count # of repeat part before the loop
             n = 0
@@ -258,22 +281,31 @@ def _decompile_RE_range(code, start, end, backward=0):
         else:
             raise DecompileError('Impossible opcode met in _decompile_RE_range:', opcode)
         i += 1
-    return pattern
+    return pattern, False
 
 def decompile_RE(fw_code, bw_code, flags):
     if flags & StrFlag.FAST_HEX_REGEXP:
-        fw = _decompile_RE_fast(fw_code)
-        bw = _decompile_RE_fast(bw_code)
+        fw = _decompile_RE_hex(fw_code, 0, len(fw_code))
+        bw = _decompile_RE_hex(bw_code, 0, len(bw_code), 1)
         if any(bw):
             re = f'{{ {" ".join(reversed(bw))} {" ".join(fw)} }}'
         else:
             re = f'{{ {" ".join(fw)} }}'
     else:
-        fw = _decompile_RE_range(fw_code, 0, len(fw_code))
-        bw = _decompile_RE_range(bw_code, 0, len(bw_code), 1)
-        fw = ''.join(fw).replace('/', '\\/').replace('?', '\\?')
-        bw = ''.join(reversed(bw)).replace('/', '\\/').replace('?', '\\?')
-        re = f'/{bw}{fw}/'
+        fw, is_hex = _decompile_RE_range(fw_code, 0, len(fw_code))
+        if not is_hex:
+            bw, is_hex = _decompile_RE_range(bw_code, 0, len(bw_code), 1)
+            if not is_hex:
+                fw = ''.join(fw).replace('/', '\\/').replace('?', '\\?')
+                bw = ''.join(reversed(bw)).replace('/', '\\/').replace('?', '\\?')
+                re = f'/{bw}{fw}/'
+                return re
+        fw = _decompile_RE_hex(fw_code, 0, len(fw_code))
+        bw = _decompile_RE_hex(bw_code, 0, len(bw_code), 1)
+        if any(bw):
+            re = f'{{ {" ".join(reversed(bw))} {" ".join(fw)} }}'
+        else:
+            re = f'{{ {" ".join(fw)} }}'
     return re
 
 def optimize_walk(node):
@@ -997,6 +1029,7 @@ class decompiler:
                         backward_code=backward_code,
                     )
                     matches.append(match_obj)
+                    # TODO: instead of iterative process, checked the "chained_to" field to chain several REs together
                     try:
                         match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
                         match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))

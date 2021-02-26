@@ -4,6 +4,7 @@ from utils import unpack, unpack2
 from pprint import pprint
 
 import io
+import string
 import struct
 import json
 from v11_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFINED, SINGLE_ARG_OPCODES, TWO_ARG_OPCODES, MAX_TABLE_BASED_STATES_DEPTH, RegexpOpcode, NO_ARG_OPCODES, IGNORED_OPCODES, SINGLE_ARG_HAS_PARENTHESES, SINGLE_ARG_NO_PARENTHESES, SPLIT_OPCODES, CLASS_OPCODES
@@ -11,6 +12,8 @@ from v11_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFIN
 OPTIONS_OUTPUT_ASM = False
 OPTIONS_OUTPUT_TREE = False
 OPTIONS_DUMP_RE_ASM = False
+
+GOOD_ASCII = string.ascii_letters + string.digits
 
 class DecompileError(Exception):
     pass
@@ -79,7 +82,10 @@ def stringify(op):
         Opcode.OP_FILESIZE: 'filesize',
         Opcode.OP_ENTRYPOINT: 'pe.entrypoint',
     }
-    return TABLE[op]
+    try:
+        return TABLE[op] # TABLE.get(op, str(op))
+    except KeyError as e:
+        raise DecompileError('Opcode %r mapping not found' % op) from e
 
 def _decompile_RE_fast(code):
     pattern = []
@@ -168,7 +174,10 @@ def _decompile_RE_range(code, start, end, backward=0):
         elif opcode == RegexpOpcode.RE_OPCODE_ANY_EXCEPT_NEW_LINE:
             pattern.append('.')
         elif opcode in [RegexpOpcode.RE_OPCODE_LITERAL, RegexpOpcode.RE_OPCODE_LITERAL_NO_CASE]:
-            pattern.append(bytes([args[0]]).decode('latin1'))
+            if chr(args[0]) in GOOD_ASCII:
+                pattern.append(bytes([args[0]]).decode('ascii'))
+            else:
+                pattern.append('\\x%.2x' % args[0])
         elif opcode == RegexpOpcode.RE_OPCODE_MASKED_LITERAL:
             if args[1] == 0xf0:
                 pattern.append('%x?' % (args[0] >> 4))
@@ -183,10 +192,8 @@ def _decompile_RE_range(code, start, end, backward=0):
                 j -= 1
                 try:
                     pattern.pop()
-                except IndexError:
-                    for c in code:
-                        print(c)
-                    exit()
+                except IndexError as e:
+                    raise DecompileError() from e
             # get the repeat part
             subpattern = _decompile_RE_range(code, j, i, backward)
             if len(subpattern) > 1:
@@ -264,7 +271,9 @@ def decompile_RE(fw_code, bw_code, flags):
     else:
         fw = _decompile_RE_range(fw_code, 0, len(fw_code))
         bw = _decompile_RE_range(bw_code, 0, len(bw_code), 1)
-        re = f'/{"".join(reversed(bw))}{"".join(fw)}/'
+        fw = ''.join(fw).replace('/', '\\/').replace('?', '\\?')
+        bw = ''.join(reversed(bw)).replace('/', '\\/').replace('?', '\\?')
+        re = f'/{bw}{fw}/'
     return re
 
 def optimize_walk(node):
@@ -325,7 +334,9 @@ class Node:
             else:
                 out += str(self.data[0])
         elif self.type == 'op':
-            if self.data == Opcode.OP_MATCH_RULE:
+            if self.data == Opcode.OP_COUNT:
+                return '#' + self.childs[0].data[1]['identifier'][1:]
+            elif self.data == Opcode.OP_MATCH_RULE:
                 for child in self.childs:
                     out += child.pretty()
                 
@@ -455,6 +466,7 @@ class YaraRule:
                 out += self.decompile()
             except DecompileError as e:
                 out += '/*\nDecompileError: %r\n*/' % e
+                out += self.asm()
             if OPTIONS_OUTPUT_TREE:
                 out += '\n/*\n%s\n*/\n' % repr(self.AST)
         out += '}\n'
@@ -985,9 +997,9 @@ class decompiler:
                         backward_code=backward_code,
                     )
                     matches.append(match_obj)
-                    match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
-                    match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))
                     try:
+                        match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
+                        match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))
                         string_obj['re'] = decompile_RE(match_obj['forward_code_asm'], match_obj['backward_code_asm'], match_obj['string']['flags'])
                     except DecompileError as e:
                         print('--- DecompileError while process following object ---')

@@ -38,7 +38,7 @@ def main():
     for rule in rules:
         o = str(rule)
         cnt += 1
-        if 'UNRECOVERABLE_REGEXP' in o:
+        if 'UNRECOVERABLE_REGEXP' in o or 'DecompileError' in o or '[Unsupported]' in o:
             unrecoverable += 1
         print(o)
     

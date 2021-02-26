@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from itertools import product
 from utils import unpack, unpack2
+from pprint import pprint
 
 import io
 import struct
@@ -245,26 +246,6 @@ def decompile_RE(fw_code, bw_code, flags):
         bw = _decompile_RE_range(bw_code, 0, len(bw_code), 1)
         re = f'/{"".join(reversed(bw))}{"".join(fw)}/'
     return re
-
-def AC_to_RE(root):
-    match_list = []
-    def _extract_matches(state):
-        if len(state['matches']) > 0:
-            for match in state['matches']:
-                match_list.append(match)
-
-        for sym, to in state['transitions'].items():
-            _extract_matches(to)
-
-    _extract_matches(root)
-
-    REs = []
-    for match in match_list:
-        ptr = match['string']['ptr']
-        re = decompile_RE(match['forward_code_asm'], match['backward_code_asm'], match['string']['flags'])
-        REs.append((ptr, re))
-
-    return REs
 
 def optimize_walk(node):
     if node.type == 'val':
@@ -715,90 +696,6 @@ class decompiler:
         self.code[ip] = dict(ptr=ip, next=next, opcode=opcode, args=args)
         return next
 
-    def parse_automaton(self):
-        buf = self.data.getbuffer()
-        self.automaton_addr_map = addr_map = {}
-        root_addr = unpack2(buf, self.automaton, 'Q')[0]
-        queue = [root_addr]
-        self.automaton_root = root = addr_map.setdefault(root_addr, {})
-
-        while queue:
-            addr = queue.pop(0)
-            node = addr_map.setdefault(addr, {})
-            if node: # visited?
-                continue
-            if not addr:
-                continue
-
-            depth, failure, match_ptr, *transitions = unpack2(buf, addr, '<B' + 'Q' * (2 + 256))
-
-            matches = []
-            while match_ptr:
-                '''
-                typedef struct _YR_AC_MATCH
-                {
-                  uint16_t backtrack;
-
-                  DECLARE_REFERENCE(YR_STRING*, string);
-                  DECLARE_REFERENCE(uint8_t*, forward_code);
-                  DECLARE_REFERENCE(uint8_t*, backward_code);
-                  DECLARE_REFERENCE(struct _YR_AC_MATCH*, next);
-
-                } YR_AC_MATCH;
-                '''
-                backtrack, string, forward_code, backward_code, next_match_ptr = unpack2(buf, match_ptr, '<HQQQQ')
-                string_obj = self.addr_string_map[string]
-                if not string_obj['str']:
-                    string_obj.setdefault('ac_ref_count', 0)
-                    string_obj['ac_ref_count'] += 1
-                    matches.append(dict(
-                        ptr=match_ptr,
-                        backtrack=backtrack,
-                        string=string_obj,
-                        forward_code=forward_code,
-                        backward_code=backward_code,
-                        ))
-                match_ptr = next_match_ptr
-
-            node['addr'] = addr
-            node['depth'] = depth
-            node['failure'] = failure
-            node['matches'] = matches
-            node['transitions'] = T = {}
-
-            if depth <= MAX_TABLE_BASED_STATES_DEPTH: # array-based
-                for i, addr in enumerate(transitions):
-                    if addr:
-                        T[bytes([i])] = addr_map.setdefault(addr, {})
-                        queue.append(addr)
-
-            else: # list-based
-                '''
-                typedef struct _YR_AC_STATE_TRANSITION
-                {
-                  uint8_t input;
-
-                  DECLARE_REFERENCE(YR_AC_STATE*, state);
-                  DECLARE_REFERENCE(struct _YR_AC_STATE_TRANSITION*, next);
-
-                } YR_AC_STATE_TRANSITION;
-                '''
-                t = transitions[0]
-                while t:
-                    input_byte, state, next_t = unpack2(buf, t, '<BQQ')
-                    if state:
-                        T[bytes([input_byte])] = addr_map.setdefault(state, {})
-                        queue.append(state)
-                    t = next_t
-
-        def eliminate_empty_tail(node):
-            for key, child in list(node['transitions'].items()):
-                eliminate_empty_tail(child)
-                if not child['matches'] and not child['transitions']:
-                    node['transitions'].pop(key, None)
-
-        eliminate_empty_tail(root)
-
     def get_raw_str(self, addr):
         if not addr:
             return None
@@ -1021,14 +918,6 @@ class decompiler:
             self.addr_string_map.update(rule.data['strings_map'])
 
         self.parse_automaton()
-        
-        REs = AC_to_RE(self.automaton_root)
-        for ptr, re in REs:
-            for rule in rules:
-                for string in rule.data['strings_list']:
-                    if string['ptr'] == ptr:
-                        string['re'] = re
-        
 
         return rules
 
@@ -1074,10 +963,18 @@ class decompiler:
                         string=string_obj,
                         forward_code=forward_code,
                         backward_code=backward_code,
-                        forward_code_asm=list(self.regexp_disasm(forward_code)),
-                        backward_code_asm=list(self.regexp_disasm(backward_code)),
                     )
                     matches.append(match_obj)
+                    if string_obj['flags'] & StrFlag.FAST_HEX_REGEXP:
+                        match_obj['forward_code_asm'] = list(self.regexp_disasm(forward_code))
+                        match_obj['backward_code_asm'] = list(self.regexp_disasm(backward_code))
+                        try:
+                            string_obj['re'] = decompile_RE(match_obj['forward_code_asm'], match_obj['backward_code_asm'], match_obj['string']['flags'])
+                        except DecompileError as e:
+                            print('--- DecompileError while process following object ---')
+                            pprint(match_obj)
+                            print(e)
+                            pass
                 match_ptr = next_match_ptr
 
             node['addr'] = addr

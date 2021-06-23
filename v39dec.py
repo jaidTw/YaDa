@@ -9,7 +9,7 @@ from v39_const import Opcode, StrFlag, RuleFlag, MetaType, _MAX_THREADS, UNDEFIN
 
 OPTIONS_OUTPUT_ASM = False
 OPTIONS_OUTPUT_TREE = False
-OPTIONS_DUMP_RE_ASM = False 
+OPTIONS_DUMP_RE_ASM = False
 
 class DecompileError(Exception):
     pass
@@ -530,7 +530,7 @@ class decompiler:
         if not self.relocate(stream):
             raise RuntimeError('Invalid file')
 
-        self.rules, self.externals, self.code_start, self.ac_match_table, _, self.ac_tables_size = unpack(self.data, '<QQQQQQ')
+        self.rules, self.externals, self.code_start, self.ac_match_table, self.ac_transition_table, self.ac_tables_size = unpack(self.data, '<QQQQQQ')
 
     def relocate(self, stream):
         try:
@@ -906,7 +906,7 @@ class decompiler:
 
         for i in range(self.ac_tables_size):
             addr = unpack2(buf, self.ac_match_table + i * 8, '<Q')[0]
-            if addr != 0:
+            while addr != 0:
                 backtrack, string, forward_code, backward_code, nxt = unpack2(buf, addr, '<QQQQQ')
                 fwcode, bwcode = [], []
                 if forward_code != 0:
@@ -920,6 +920,7 @@ class decompiler:
                     'backward_code': bwcode,
                     'next': nxt
                 })
+                addr = nxt
 
         REs = []
         for match in match_list:

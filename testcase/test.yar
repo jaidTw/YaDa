@@ -1,6 +1,6 @@
 rule Rule01 {
 meta:
-	author = "Inndy"
+	author = "Jesse"
 
 strings:
 	$a1  = "str1"
@@ -22,7 +22,7 @@ condition:
 
 rule Rule02 {
 meta:
-	author = "Inndy"
+	author = "Jesse"
 	meta_bool = false
 	meta_int = 31415926
 

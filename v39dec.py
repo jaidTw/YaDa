@@ -492,7 +492,7 @@ class YaraRule:
         return str(self.AST)
 
     def asm(self):
-        out = '\t__yaradec_asm__:\n'
+        out = '\t__yada_asm__:\n'
         for val in self.data.get('code', []):
             out += '\t{:x}\t{}'.format(val['ptr'], val['opcode'].name)
             if val['args']:

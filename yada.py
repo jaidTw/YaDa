@@ -43,7 +43,6 @@ def main():
         print(o)
     
     print('/* Decompile %d/%d rules */' % (cnt - unrecoverable, cnt))
-    print('// vim: ft=yara')
 
 
 if __name__ == '__main__':

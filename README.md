@@ -47,11 +47,9 @@ there are methods to output rules syntax tree in JSON and to output the bytecode
 Please refer to classes defined in `v11dec.py` and `v39dec.py`.
 
 ## Materials
-If you are intrested in the implementation, YaDa is presented at [SECCON 13 Open Conference](https://www.seccon.jp/13/ep250301.html).
+If you are intrested in the implementation, check out the [slides](/slide/yada.pdf) presented at [SECCON 13 Open Conference](https://www.seccon.jp/13/ep250301.html), and 
 
-Slides: [here](/slide/yada.pdf)
-
-I also submitted YaDa as my graduate school's project. You can get the report [here](https://drive.google.com/file/d/1IBZ9boTltduVgLBn66IU5It7lI5ULFc1/view?usp=sharing).
+I also submitted YaDa as my graduate school's project. You can also checkout the report [here](https://drive.google.com/file/d/1IBZ9boTltduVgLBn66IU5It7lI5ULFc1/view?usp=sharing) if you prefer reading text.
 
 
 ## Limitations

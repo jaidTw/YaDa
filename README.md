@@ -49,7 +49,7 @@ Please refer to classes defined in `v11dec.py` and `v39dec.py`.
 ## Materials
 If you are intrested in the implementation, YaDa is presented at [SECCON 13 Open Conference](https://www.seccon.jp/13/ep250301.html).
 
-Slides:
+Slides: [here](/slide/yada.pdf)
 
 I also submitted YaDa as my graduate school's project. You can get the report [here](https://drive.google.com/file/d/1IBZ9boTltduVgLBn66IU5It7lI5ULFc1/view?usp=sharing).
 
